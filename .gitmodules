@@ -1,0 +1,3 @@
+[submodule "tools/serial-xfer"]
+	path = tools/serial-xfer
+	url = git@github.com:kjellktbtr/serial-xfer.git

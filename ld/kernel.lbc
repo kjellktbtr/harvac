@@ -1,0 +1,14 @@
+# Harvac kernel linker script
+# Produces a flat binary loaded at 0x1000:0x0000
+
+format raw bin
+option offset=0
+option quiet
+
+name KERNEL.COM
+
+# Link order matters: entry first (must be at binary offset 0)
+file entry.obj
+file kmain.obj
+
+# BSS segment must be last so it doesn't inflate the binary

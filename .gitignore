@@ -1,0 +1,17 @@
+# Compiler/linker scratch output
+*.err
+build/obj/
+build/*.lnk
+build/*.lst
+build/*.map
+build2/
+__pycache__/
+
+# QEMU / serial test scratch files
+serial_out.txt
+pipe.in
+pipe.out
+
+# NOTE: harvac.img and build/*.COM (plus mbr.bin/vbr.bin) are kept in
+# version control on purpose, so users can run HarvaC without the toolchain.
+*.map
