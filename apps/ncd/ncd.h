@@ -12,16 +12,16 @@ typedef unsigned long  u32;
 #define ROWS        25
 #define COLS        80
 
-/* Row assignments */
-#define ROW_MENU        0
+/* Row assignments (0 = top border of panes) */
 #define ROW_PATH        1
 #define ROW_HEADER      2
 #define ROW_FILE_FIRST  3
-#define ROW_FILE_LAST   18     /* 16 rows of file entries */
-#define ROW_SHELL       19
-#define ROW_SEP         20
+#define ROW_FILE_LAST   19     /* 17 rows of file entries */
+#define ROW_BORDER      20     /* bottom border of panes */
 #define ROW_STATUS      21
-#define ROW_HELP        22
+#define ROW_MSG         22     /* transient messages ("2 copied") */
+#define ROW_SHELL       23     /* command line */
+#define ROW_FKEYS       24     /* inverted F-key bar */
 
 /* Pane column boundaries */
 #define LEFT_PANE_LEFT  0
@@ -34,10 +34,21 @@ typedef unsigned long  u32;
 #define PANE_INNER_RIGHT(p)   ((p) == 0 ? 38 : 78)
 #define PANE_WIDTH            38
 
-/* Column widths within a pane */
-#define COL_NAME_WIDTH  16
-#define COL_SIZE_WIDTH  10
-#define COL_DATE_WIDTH  12
+/* Column layout within a pane: |NAME 12|SIZE 5|DATE 10|TIME 5| = 37 cols.
+ * Offsets are relative to the pane's first interior column. */
+#define COL_NAME_WIDTH  12
+#define COL_SIZE_WIDTH  5
+#define COL_DATE_WIDTH  10
+#define COL_TIME_WIDTH  5
+#define P_SEP0   0             /* '|' */
+#define P_NAME   1
+#define P_SEP1   13            /* '|' */
+#define P_SIZE   14
+#define P_SEP2   19            /* '|' */
+#define P_DATE   20
+#define P_SEP3   30            /* '|' */
+#define P_TIME   31
+#define P_SEP4   36            /* '|' */
 
 /* Attributes */
 #define A_NORMAL      0x07    /* white on black */

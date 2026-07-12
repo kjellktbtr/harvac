@@ -11,7 +11,7 @@ related:
   - "[[shell]]"
   - "[[user-apps]]"
 created: 2026-07-05
-updated: 2026-07-09
+updated: 2026-07-12
 confidence: high
 ---
 
@@ -44,6 +44,33 @@ called from C as `get_next_seg()` / `set_next_seg(v)`.
 
 `exec.c` initializes `g_next_seg` to `COM_SEGMENT + alloc_paras` after the
 shell itself is loaded at boot, so children start above the shell.
+
+### Process slot size — `PROC_PARAS` (24 KB since 2026-07-12)
+
+Every child gets a fixed slot of `PROC_PARAS` paragraphs with its stack at
+`PROC_SP`. The slot **must exceed the app's near data (code + initialized data
++ BSS) plus stack**, because a program's `SYSCALL_ALLOC` far blocks are handed
+out starting at `child_seg + PROC_PARAS`. If near BSS runs past the slot, it
+aliases the app's own far allocation.
+
+This bit EDIT.COM: its near data reaches ~`0x40E8`, just over the old 16 KB
+(`0x4000`) slot, so loading a file into EDIT's far gap buffer (allocated at
+`child_seg + 0x400`) overwrote EDIT's globals — `menu_wrap_flag` came up
+nonzero and the word-wrap layout looped forever. Small files happened to leave
+the critical byte zero, masking the bug. Fixed by raising `PROC_PARAS` to
+`0x0600` (24 KB) and `PROC_SP` to `0x5FFE` (`src/include/constants.h`).
+
+`SYSCALL_EXEC` also now **zeroes the whole child slot before loading** the
+`.COM` image, so uninitialized globals (BSS, which is not part of the file)
+start cleared instead of inheriting a previous child's RAM.
+
+### Program search order (2026-07-12)
+
+`SYSCALL_EXEC` resolves the program name as: a name containing `/` is resolved
+as an explicit path; a bare name is searched in the **current working
+directory**, then the root, then `/BIN`. Each location is tried with the name
+as given and with `.COM` auto-appended. Previously only root and `/BIN` were
+searched, so `.COM`/`.BAT` files in the CWD could not be run by name.
 
 ### Execution Flow
 

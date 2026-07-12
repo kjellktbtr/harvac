@@ -113,44 +113,73 @@ void ncd_format_name(const ncd_dirent_t *ent, char *buf, u16 maxlen)
     buf[j] = '\0';
 }
 
-void ncd_format_datetime(u16 date, u16 time, char *buf, u16 maxlen)
+/* Format "FILE.TXT" as "FILE     TXT" (8-char name, space, 3-char ext).
+ * Names without extension (directories) are left-aligned. buf >= 13 bytes. */
+void ncd_format_name12(const char *name, char *buf)
 {
-    u16 year, month, day, hour, minute;
-    u16 tlen;
-    char tmp[6];
+    u16 i;
+    u16 dot = 0xFFFF;
 
-    (void)maxlen;  /* assume buf >= 16 bytes */
+    for (i = 0; name[i]; i++) {
+        if (name[i] == '.')
+            dot = i;
+    }
+
+    for (i = 0; i < 12; i++)
+        buf[i] = ' ';
+    buf[12] = '\0';
+
+    if (dot == 0xFFFF || dot > 8) {
+        for (i = 0; name[i] && i < 12; i++)
+            buf[i] = name[i];
+    } else {
+        for (i = 0; i < dot; i++)
+            buf[i] = name[i];
+        for (i = 0; name[dot + 1 + i] && i < 3; i++)
+            buf[9 + i] = name[dot + 1 + i];
+    }
+}
+
+/* Format FAT16 date as "YYYY.MM.DD"; blank (spaces) when zero.
+ * buf >= 11 bytes. */
+void ncd_format_date(u16 date, char *buf)
+{
+    u16 i;
+
+    if (date == 0) {
+        for (i = 0; i < 10; i++)
+            buf[i] = ' ';
+        buf[10] = '\0';
+        return;
+    }
 
     /* FAT16 date: bits 0-4=day, 5-8=month, 9-15=year offset from 1980 */
-    day   = date & 0x1F;
-    month = (date >> 5) & 0x0F;
-    year  = (date >> 9) + 1980;
+    m_u32toa((u32)((date >> 9) + 1980), buf);   /* always 4 digits */
+    buf[4] = '.';
+    m_itoa_pad2((date >> 5) & 0x0F, buf + 5);
+    buf[7] = '.';
+    m_itoa_pad2(date & 0x1F, buf + 8);
+    buf[10] = '\0';
+}
+
+/* Format FAT16 time as "HH:MM"; blank when the entry has no timestamp.
+ * buf >= 6 bytes. */
+void ncd_format_time(u16 date, u16 time, char *buf)
+{
+    u16 i;
+
+    if (date == 0 && time == 0) {
+        for (i = 0; i < 5; i++)
+            buf[i] = ' ';
+        buf[5] = '\0';
+        return;
+    }
 
     /* FAT16 time: bits 0-4=seconds/2, 5-10=minute, 11-15=hour */
-    hour   = time >> 11;
-    minute = (time >> 5) & 0x3F;
-
-    /* Format as YYYY-MM-DD HH:MM */
-    m_u32toa((u32)year, tmp);
-    tlen = (u16)strlen(tmp);
-    memcpy(buf, tmp, tlen);
-    buf[tlen++] = '-';
-    m_itoa(month, tmp);
-    memcpy(buf + tlen, tmp, strlen(tmp));
-    tlen += (u16)strlen(tmp);
-    buf[tlen++] = '-';
-    m_itoa(day, tmp);
-    memcpy(buf + tlen, tmp, strlen(tmp));
-    tlen += (u16)strlen(tmp);
-    buf[tlen++] = ' ';
-    m_itoa(hour, tmp);
-    memcpy(buf + tlen, tmp, strlen(tmp));
-    tlen += (u16)strlen(tmp);
-    buf[tlen++] = ':';
-    m_itoa(minute, tmp);
-    memcpy(buf + tlen, tmp, strlen(tmp));
-    tlen += (u16)strlen(tmp);
-    buf[tlen] = '\0';
+    m_itoa_pad2(time >> 11, buf);
+    buf[2] = ':';
+    m_itoa_pad2((time >> 5) & 0x3F, buf + 3);
+    buf[5] = '\0';
 }
 
 int ncd_is_dot_entry(const ncd_dirent_t *ent)

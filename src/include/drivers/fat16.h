@@ -172,4 +172,32 @@ uint16_t fat16_rmdir(fat16_fs_t *fs, const uint8_t *name);
 uint16_t fat16_rename(fat16_fs_t *fs, const uint8_t *old_name,
                        const uint8_t *new_name);
 
+/* ─── Directory-aware variants ───
+ * dir_cluster/parent_cluster 0 = root directory; >= 2 = first cluster of a
+ * subdirectory. The root-directory functions above are thin wrappers that
+ * pass 0. Subdirectory chains are extended automatically when a directory
+ * fills up (root cannot grow). */
+
+/* Create a new empty file in the given directory. */
+uint16_t fat16_create_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                             const uint8_t *name, fat16_file_t *file);
+
+/* Delete a file from the given directory and free its cluster chain. */
+uint16_t fat16_delete_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                             const uint8_t *name);
+
+/* Create a subdirectory inside the given parent directory ("." and ".."
+ * entries are written; ".." points at parent_cluster). */
+uint16_t fat16_mkdir_in_dir(fat16_fs_t *fs, uint16_t parent_cluster,
+                            const uint8_t *name);
+
+/* Remove an empty directory from the given directory. */
+uint16_t fat16_rmdir_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                            const uint8_t *name);
+
+/* Rename a file or directory within the given directory. */
+uint16_t fat16_rename_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                             const uint8_t *old_name,
+                             const uint8_t *new_name);
+
 #endif /* DRIVERS_FAT16_H */

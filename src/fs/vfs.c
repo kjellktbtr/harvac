@@ -78,64 +78,110 @@ static void normalize_path(const char *src, char *dst, uint16_t dstlen)
     dst[di] = '\0';
 }
 
+/* ─── Build a normalized absolute path from a possibly-relative one ─── */
+void vfs_abspath(const char *path, char *dst, uint16_t dstlen)
+{
+    char full[VFS_MAX_PATH];
+    uint16_t i, j;
+
+    if (path[0] == '/') {
+        normalize_path(path, dst, dstlen);
+        return;
+    }
+
+    /* Relative path: combine with cwd */
+    i = strlen(cwd);
+    for (j = 0; j < i && j < VFS_MAX_PATH - 1; j++)
+        full[j] = cwd[j];
+    if (j == 0 || full[j - 1] != '/')
+        full[j++] = '/';
+    for (i = 0; path[i] != '\0' && j < VFS_MAX_PATH - 1; i++, j++)
+        full[j] = path[i];
+    full[j] = '\0';
+    normalize_path(full, dst, dstlen);
+}
+
+/* ─── Pack one path component into 8.3 format ─── */
+/* Reads comp up to '\0' or '/'; out must be 12 bytes ("NAME    EXT" + NUL). */
+void vfs_name_to_83(const char *comp, uint8_t *out)
+{
+    uint16_t i;
+    uint8_t ni = 0, ei = 0;
+    uint8_t dot = 0;
+
+    for (i = 0; i < 11; i++)
+        out[i] = ' ';
+    out[11] = '\0';
+
+    for (i = 0; comp[i] != '\0' && comp[i] != '/'; i++) {
+        uint8_t ch = (uint8_t)comp[i];
+        if (ch == '.' && !dot) {
+            dot = 1;
+            continue;
+        }
+        if (ch >= 'a' && ch <= 'z')
+            ch -= 32;
+        if (!dot) {
+            if (ni < 8) out[ni++] = ch;
+        } else {
+            if (ei < 3) out[8 + ei++] = ch;
+        }
+    }
+}
+
+/* ─── Resolve an absolute path to a directory cluster ─── */
+uint16_t vfs_resolve_dir(const char *abs_path,
+                         mount_entry_t **mnt_out,
+                         uint16_t *dir_cluster_out)
+{
+    mount_entry_t *mnt;
+    /* Statics per kernel syscall convention (see syscalls.c) */
+    static const char *rel;
+    static fat16_dirent_t dirent;
+    static uint8_t name_83[12];
+    uint16_t cluster = 0;
+    uint16_t i;
+
+    mnt = mount_resolve(abs_path, &rel);
+    if (!mnt)
+        return ERR_NOT_FOUND;
+
+    /* Walk the path components below the mount point */
+    i = 0;
+    while (rel[i] != '\0') {
+        while (rel[i] == '/') i++;
+        if (rel[i] == '\0') break;
+
+        vfs_name_to_83(rel + i, name_83);
+        if (fat16_find_in_dir(&mnt->fs, cluster, name_83, &dirent,
+                              NULL, NULL) != 0)
+            return ERR_NOT_FOUND;
+        if (!(dirent.attrs & FAT16_ATTR_DIRECTORY))
+            return ERR_ACCESS_DENIED;
+        cluster = dirent.first_cluster;
+
+        while (rel[i] != '\0' && rel[i] != '/') i++;
+    }
+
+    if (mnt_out)
+        *mnt_out = mnt;
+    if (dir_cluster_out)
+        *dir_cluster_out = cluster;
+    return 0;
+}
+
 /* ─── Change working directory ─── */
 uint16_t vfs_chdir(const char *path)
 {
     char resolved[VFS_MAX_CWD];
-    char full[VFS_MAX_CWD];
-    mount_entry_t *mnt;
-    const char *rel;
     uint16_t ret;
 
-    /* Build full path */
-    if (path[0] == '/') {
-        /* Absolute path */
-        normalize_path(path, resolved, VFS_MAX_CWD);
-    } else {
-        /* Relative path: combine with cwd */
-        uint16_t i, j;
-        i = strlen(cwd);
-        for (j = 0; j < i && j < VFS_MAX_CWD - 1; j++)
-            full[j] = cwd[j];
-        if (full[j - 1] != '/')
-            full[j++] = '/';
-        for (i = 0; path[i] != '\0' && j < VFS_MAX_CWD - 1; i++, j++)
-            full[j] = path[i];
-        full[j] = '\0';
-        normalize_path(full, resolved, VFS_MAX_CWD);
-    }
+    vfs_abspath(path, resolved, VFS_MAX_CWD);
 
-    /* Check that the directory exists by trying to resolve it.
-     * For root dir ("/"), always succeed. */
-    if (strcmp(resolved, "/") == 0) {
-        strcpy(cwd, resolved);
-        return 0;
-    }
-
-    /* For subdirectories, try to resolve via mount */
-    mnt = mount_resolve(resolved, &rel);
-    if (!mnt)
-        return ERR_NOT_FOUND;
-
-    if (rel && *rel) {
-        uint8_t name_83[12];
-        fat16_dirent_t dirent;
-        uint16_t j;
-
-        for (j = 0; j < 11; j++) name_83[j] = ' ';
-        name_83[11] = '\0';
-        for (j = 0; j < 8 && rel[j] != '\0' && rel[j] != '/'; j++) {
-            uint8_t ch = (uint8_t)rel[j];
-            if (ch >= 'a' && ch <= 'z') ch -= 32;
-            name_83[j] = ch;
-        }
-
-        ret = fat16_find(&mnt->fs, name_83, &dirent, NULL, NULL);
-        if (ret != 0)
-            return ERR_NOT_FOUND;
-        if (!(dirent.attrs & FAT16_ATTR_DIRECTORY))
-            return ERR_ACCESS_DENIED;
-    }
+    /* Check that the directory exists (walks all components) */
+    ret = vfs_resolve_dir(resolved, NULL, NULL);
+    if (ret != 0)
+        return ret;
 
     /* Store canonical upper-case (FAT is case-insensitive; consumers
      * such as SYSCALL_OPENDIR match the CWD against 8.3 names) */
@@ -152,34 +198,13 @@ uint16_t vfs_resolve(const char *path,
                       mount_entry_t **mount_out,
                       uint8_t *name_83_out)
 {
-    char full[VFS_MAX_CWD];
     char resolved[VFS_MAX_CWD];
     const char *rel;
-    uint16_t i;
+    const char *last;
+    const char *p;
     mount_entry_t *mnt;
 
-    /* Build absolute path */
-    if (path[0] != '/') {
-        /* Relative to CWD */
-        uint16_t j;
-        i = strlen(cwd);
-        for (j = 0; j < i && j < VFS_MAX_CWD - 1; j++)
-            full[j] = cwd[j];
-        if (i > 0 && full[i - 1] != '/')
-            full[i++] = '/';
-        for (j = 0; path[j] != '\0' && i < VFS_MAX_CWD - 1; i++, j++)
-            full[i] = path[j];
-        full[i] = '\0';
-    } else {
-        i = 0;
-        while (path[i] != '\0' && i < VFS_MAX_CWD - 1) {
-            full[i] = path[i];
-            i++;
-        }
-        full[i] = '\0';
-    }
-
-    normalize_path(full, resolved, VFS_MAX_CWD);
+    vfs_abspath(path, resolved, VFS_MAX_CWD);
 
     /* Resolve through mount table */
     mnt = mount_resolve(resolved, &rel);
@@ -189,48 +214,13 @@ uint16_t vfs_resolve(const char *path,
     if (mount_out)
         *mount_out = mnt;
 
-    /* Extract filename into 8.3 format */
-    {
-        uint16_t j;
-        uint8_t dot_found = 0;
-        uint8_t name_part[9], ext_part[4];
-        uint8_t ni = 0, ei = 0;
-
-        for (j = 0; j < 8; j++) name_part[j] = ' ';
-        for (j = 0; j < 3; j++) ext_part[j] = ' ';
-
-        if (rel) {
-            /* Skip to last component (past any slashes) */
-            const char *last = rel;
-            const char *p = rel;
-            while (*p) {
-                if (*p == '/')
-                    last = p + 1;
-                p++;
-            }
-
-            /* Parse name[.ext] */
-            for (p = last; *p && *p != '/'; p++) {
-                if (*p == '.' && !dot_found) {
-                    dot_found = 1;
-                } else if (!dot_found && ni < 8) {
-                    uint8_t ch = (uint8_t)*p;
-                    if (ch >= 'a' && ch <= 'z') ch -= 32;
-                    name_part[ni++] = ch;
-                } else if (dot_found && ei < 3) {
-                    uint8_t ch = (uint8_t)*p;
-                    if (ch >= 'a' && ch <= 'z') ch -= 32;
-                    ext_part[ei++] = ch;
-                }
-            }
-        }
-
-        for (j = 0; j < 8; j++)
-            name_83_out[j] = name_part[j];
-        for (j = 0; j < 3; j++)
-            name_83_out[8 + j] = ext_part[j];
-        name_83_out[11] = '\0';
+    /* Pack the last component into 8.3 format */
+    last = rel;
+    for (p = rel; *p; p++) {
+        if (*p == '/')
+            last = p + 1;
     }
+    vfs_name_to_83(last, name_83_out);
 
     return 0;
 }

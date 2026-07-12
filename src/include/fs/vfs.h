@@ -23,6 +23,21 @@ void vfs_getcwd(char *buf, uint16_t buflen);
 
 /* ─── Path resolution ─── */
 
+/* Build a normalized absolute path from a possibly-relative one
+ * (resolves against CWD; collapses ".", "..", double slashes). */
+void vfs_abspath(const char *path, char *dst, uint16_t dstlen);
+
+/* Pack one path component (up to '\0' or '/') into 8.3 format.
+ * out must be 12 bytes; receives "NAME    EXT" + NUL. */
+void vfs_name_to_83(const char *comp, uint8_t *out);
+
+/* Resolve an absolute path that names a directory to its first cluster.
+ * *dir_cluster_out receives 0 for the mount root, else the cluster.
+ * Either out pointer may be NULL. Returns 0 on success. */
+uint16_t vfs_resolve_dir(const char *abs_path,
+                         mount_entry_t **mnt_out,
+                         uint16_t *dir_cluster_out);
+
 /* Resolve a path to an 8.3 filename within a mount.
  * If path is relative, it's resolved against CWD.
  * mount_out receives the mount entry.

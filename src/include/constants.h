@@ -123,11 +123,14 @@
 #define STACK_TOP           0x9F000UL
 #define MAX_CONVENTIONAL    0xA0000UL
 
-/* Per-process allocation: 16 KB per exec'd .COM (code + BSS + stack).
- * Small enough that a 256 KB machine (IBM 5155) fits shell + child +
- * a spare 16 KB SYSCALL_ALLOC block above the kernel's 64 KB segment. */
-#define PROC_PARAS          0x0400   /* 16 KB in paragraphs */
-#define PROC_SP             0x3FFE   /* initial child SP (top of 16 KB) */
+/* Per-process allocation: 24 KB per exec'd .COM (code + BSS + stack).
+ * Must exceed the largest app's near data + stack, otherwise its BSS runs
+ * past the slot and collides with the far buffer it allocates at
+ * child_seg+PROC_PARAS. EDIT.COM's near data reaches ~0x40E8 (just over
+ * 16 KB), so 16 KB is too small: loading a file overwrote EDIT's globals
+ * (menu_wrap_flag etc.) and hung its layout. 24 KB leaves headroom. */
+#define PROC_PARAS          0x0600   /* 24 KB in paragraphs */
+#define PROC_SP             0x5FFE   /* initial child SP (top of 24 KB) */
 
 /* ─── FAT16 ─── */
 #define FAT16_EOF       0xFFF8

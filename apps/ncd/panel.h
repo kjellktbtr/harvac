@@ -37,6 +37,7 @@ void panel_entry_set(panel_t *p, u16 i, const panel_entry_t *in);
 
 /* Panel operations */
 void panel_init(panel_t *p);
+void panel_sync_cwd(panel_t *p);   /* chdir to the panel's own directory */
 void panel_refresh(panel_t *p);
 void panel_render(panel_t *p, int pane_id);
 void panel_up(panel_t *p);
@@ -61,10 +62,8 @@ const char *panel_get_cwd(panel_t *p);
 void panel_done(panel_t *p);
 
 /* Render functions for UI chrome */
-void render_menu_bar(void);
 void render_pane_borders(void);
-void render_separator(void);
 void render_status_line(void);
-void render_help_line(void);
+void render_fkey_bar(void);
 
 #endif /* PANEL_H */

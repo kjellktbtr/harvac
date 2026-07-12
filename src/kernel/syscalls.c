@@ -94,42 +94,89 @@ void exec_far_jump_sp(uint16_t target_seg, uint16_t target_off,
     parm [dx] [ax] [bx] [cx] [si] modify [ax bx cx dx si];
 
 /* ─── Convert "NAME.EXT" to 8.3 packed format ─── */
-/* Reads the filename from segment:offset using read_far_b. */
+/* Reads the filename from segment:offset using read_far_b.
+ * If the string contains '/', only the last path component is packed. */
 static void name_to_83(uint16_t seg, uint16_t off, uint8_t *out)
 {
-    uint8_t i, c;
-    uint16_t dot;
+    /* Static: kernel syscall convention (see SYSCALL_READ). */
+    static char comp[32];
+    uint16_t i;
+    uint16_t last = 0;
+    uint8_t c;
 
-    /* Clear to spaces */
-    for (i = 0; i < 11; i++)
-        out[i] = ' ';
+    /* Skip to the character after the last '/' */
+    for (i = 0; ; i++) {
+        c = read_far_b(seg, off + i);
+        if (c == '\0')
+            break;
+        if (c == '/')
+            last = i + 1;
+    }
 
-    /* Find the dot (or end of string) */
-    for (dot = 0; ; dot++) {
-        c = read_far_b(seg, off + dot);
-        if (c == '\0' || c == '.')
+    for (i = 0; i < sizeof(comp) - 1; i++) {
+        c = read_far_b(seg, off + last + i);
+        comp[i] = (char)c;
+        if (c == '\0')
             break;
     }
+    comp[sizeof(comp) - 1] = '\0';
 
-    /* Copy name part (up to 8 chars), upper-casing */
-    for (i = 0; i < dot && i < 8; i++) {
-        uint8_t ch = read_far_b(seg, off + i);
-        if (ch >= 'a' && ch <= 'z')
-            ch -= 32;
-        out[i] = ch;
-    }
+    vfs_name_to_83(comp, out);
+}
 
-    /* Copy extension (up to 3 chars), upper-casing */
-    if (c == '.') {
-        for (i = 0; i < 3; i++) {
-            uint8_t ch = read_far_b(seg, off + dot + 1 + i);
-            if (ch == '\0')
-                break;
-            if (ch >= 'a' && ch <= 'z')
-                ch -= 32;
-            out[8 + i] = ch;
-        }
+/* ─── Resolve a user path to {fs, directory cluster, 8.3 name} ─── */
+/* Reads the path string from seg:off, makes it absolute against the CWD,
+ * resolves all directory components and packs the final component in 8.3.
+ * *dir_cluster_out receives 0 for the root directory.
+ * Returns 0 on success, ERR_NOT_FOUND if a directory component is missing,
+ * ERR_INVALID_PARAM if the path has no final component (e.g. "/"). */
+static uint16_t resolve_user_path(uint16_t seg, uint16_t off,
+                                  fat16_fs_t **fs_out,
+                                  uint16_t *dir_cluster_out,
+                                  uint8_t *name83_out)
+{
+    /* Static: kernel syscall convention (see SYSCALL_READ). */
+    static char upath[VFS_MAX_PATH];
+    static char apath[VFS_MAX_PATH];
+    static mount_entry_t *mnt;
+    static uint16_t dir_cluster;
+    uint16_t i;
+    uint16_t last;
+
+    for (i = 0; i < VFS_MAX_PATH - 1; i++) {
+        uint8_t c = read_far_b(seg, off + i);
+        upath[i] = (char)c;
+        if (c == 0)
+            break;
     }
+    upath[VFS_MAX_PATH - 1] = '\0';
+
+    vfs_abspath(upath, apath, VFS_MAX_PATH);
+
+    /* Split into directory part and final component */
+    last = 0;
+    for (i = 0; apath[i] != '\0'; i++) {
+        if (apath[i] == '/')
+            last = i;
+    }
+    if (apath[last + 1] == '\0')
+        return ERR_INVALID_PARAM;   /* no final component ("/", "/TMP/") */
+
+    vfs_name_to_83(apath + last + 1, name83_out);
+
+    /* Terminate the directory part (keep at least "/") */
+    if (last == 0)
+        apath[1] = '\0';
+    else
+        apath[last] = '\0';
+
+    if (vfs_resolve_dir(apath, &mnt, &dir_cluster) != 0)
+        return ERR_NOT_FOUND;
+
+    if (fs_out)
+        *fs_out = &mnt->fs;
+    *dir_cluster_out = dir_cluster;
+    return 0;
 }
 
 /* ─── Resolve the VFS CWD to a directory cluster ─── */
@@ -137,35 +184,15 @@ static void name_to_83(uint16_t seg, uint16_t off, uint8_t *out)
  * returns 0 when the CWD is the root (or cannot be resolved). */
 static uint16_t cwd_dir_cluster(uint16_t *cluster_out)
 {
-    /* Static: callees write via near ptr (DS=KERNEL_SEGMENT) but autos
-     * live at SS=caller segment — same SS!=DS bug as SYSCALL_READ. */
+    /* Static: kernel syscall convention (see SYSCALL_READ). */
     static char cwd_path[VFS_MAX_CWD];
-    mount_entry_t *mnt;
-    static const char *rel;
-    static uint8_t name_83[12];
-    static fat16_dirent_t dirent;
-    uint16_t j;
+    static uint16_t cluster;
 
     vfs_getcwd(cwd_path, VFS_MAX_CWD);
-    if (strcmp(cwd_path, "/") == 0)
+    if (vfs_resolve_dir(cwd_path, NULL, &cluster) != 0 || cluster == 0)
         return 0;
 
-    mnt = mount_resolve(cwd_path, &rel);
-    if (!mnt || !rel || !*rel)
-        return 0;
-
-    for (j = 0; j < 11; j++) name_83[j] = ' ';
-    for (j = 0; j < 8 && rel[j] != '\0' && rel[j] != '/'; j++) {
-        uint8_t ch = (uint8_t)rel[j];
-        if (ch >= 'a' && ch <= 'z') ch -= 32;
-        name_83[j] = ch;
-    }
-
-    if (fat16_find(&mnt->fs, name_83, &dirent, NULL, NULL) != 0
-        || !(dirent.attrs & FAT16_ATTR_DIRECTORY))
-        return 0;
-
-    *cluster_out = dirent.first_cluster;
+    *cluster_out = cluster;
     return 1;
 }
 
@@ -316,15 +343,20 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
     /* File I/O (0x10-0x1F) */
     case SYSCALL_OPEN:
         {
-            /* DS:BX = filename (C string), AL = flags (O_RDONLY etc.) */
+            /* DS:BX = path (C string), AL = flags (O_RDONLY etc.).
+             * Path may be relative (resolved against CWD) or absolute
+             * with subdirectories ("/DOCS/MANUAL.TXT"). */
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static uint8_t name_83[12];
-            uint16_t i;
             static uint16_t dir_cluster;
+            static fat16_fs_t *fs;
+            uint16_t i;
 
-            /* Convert to 8.3 format */
-            name_to_83(caller_ds, bx, name_83);
-            name_83[11] = '\0';
+            if (resolve_user_path(caller_ds, bx, &fs, &dir_cluster,
+                                  name_83) != 0) {
+                ret = 0xFFFF;
+                break;
+            }
 
             /* Find a free slot in the open file table */
             for (i = 0; i < MAX_OPEN_FILES; i++) {
@@ -332,19 +364,12 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                     break;
             }
             if (i >= MAX_OPEN_FILES) {
-                ret = ERR_TOO_MANY_FILES;
+                ret = 0xFFFF;   /* callers treat >= 16 as failure */
                 break;
             }
 
-            /* Open the file: in the CWD when it is a subdirectory
-             * (same one-level resolution as SYSCALL_OPENDIR), else root */
-            if (cwd_dir_cluster(&dir_cluster)) {
-                if (fat16_open_in_dir(&root_fs, dir_cluster, name_83,
-                                      &open_files[i].file) != 0) {
-                    ret = 0xFFFF;
-                    break;
-                }
-            } else if (fat16_open(&root_fs, name_83, &open_files[i].file) != 0) {
+            if (fat16_open_in_dir(fs, dir_cluster, name_83,
+                                  &open_files[i].file) != 0) {
                 ret = 0xFFFF;
                 break;
             }
@@ -371,8 +396,10 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
             uint16_t user_buf = cx;
             uint16_t count = dx;
             /* Static: fat16_read writes via near ptr (DS=KERNEL_SEGMENT) but
-             * auto tmp would be read via SS=COM_SEGMENT — same SS!=DS bug. */
-            static uint8_t tmp[32];
+             * auto tmp would be read via SS=COM_SEGMENT — same SS!=DS bug.
+             * 512 bytes = one sector per fat16_read call (16x fewer
+             * read-modify-write cycles than the old 32-byte chunks). */
+            static uint8_t tmp[512];
             uint16_t total = 0;
             uint16_t chunk;
             uint16_t n;
@@ -383,7 +410,7 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                 break;
             }
             while (count > 0) {
-                chunk = (count > 32) ? 32 : count;
+                chunk = (count > sizeof(tmp)) ? sizeof(tmp) : count;
                 n = fat16_read(&open_files[handle].file, tmp, chunk);
                 if (n == 0) break;
                 for (i = 0; i < n; i++)
@@ -400,8 +427,10 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
             uint16_t handle = bx;
             uint16_t user_buf = cx;
             uint16_t count = dx;
-            /* Static: see SYSCALL_READ — same SS!=DS requirement. */
-            static uint8_t tmp[32];
+            /* Static: see SYSCALL_READ — same SS!=DS requirement.
+             * 512 bytes so sector-aligned writes skip the per-32-byte
+             * read-modify-write in fat16_write. */
+            static uint8_t tmp[512];
             uint16_t total = 0;
             uint16_t chunk;
             uint16_t n;
@@ -412,7 +441,7 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                 break;
             }
             while (count > 0) {
-                chunk = (count > 32) ? 32 : count;
+                chunk = (count > sizeof(tmp)) ? sizeof(tmp) : count;
                 for (i = 0; i < chunk; i++)
                     tmp[i] = read_far_b(caller_ds, user_buf + total + i);
                 n = fat16_write(&open_files[handle].file, tmp, chunk);
@@ -428,10 +457,15 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
         {
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static uint8_t name_83[12];
+            static uint16_t dir_cluster;
+            static fat16_fs_t *fs;
             uint16_t i;
 
-            name_to_83(caller_ds, bx, name_83);
-            name_83[11] = '\0';
+            if (resolve_user_path(caller_ds, bx, &fs, &dir_cluster,
+                                  name_83) != 0) {
+                ret = 0xFFFF;   /* bad path / missing directory */
+                break;
+            }
 
             /* Find a free slot in the open file table */
             for (i = 0; i < MAX_OPEN_FILES; i++) {
@@ -443,7 +477,8 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                 break;
             }
 
-            if (fat16_create(&root_fs, name_83, &open_files[i].file) != 0) {
+            if (fat16_create_in_dir(fs, dir_cluster, name_83,
+                                    &open_files[i].file) != 0) {
                 ret = 0xFFFF;   /* disk full or file already exists */
                 break;
             }
@@ -456,11 +491,16 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
         {
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static uint8_t name_83[12];
+            static uint16_t dir_cluster;
+            static fat16_fs_t *fs;
 
-            name_to_83(caller_ds, bx, name_83);
-            name_83[11] = '\0';
+            if (resolve_user_path(caller_ds, bx, &fs, &dir_cluster,
+                                  name_83) != 0) {
+                ret = ERR_NOT_FOUND;
+                break;
+            }
 
-            if (fat16_delete(&root_fs, name_83) != 0)
+            if (fat16_delete_in_dir(fs, dir_cluster, name_83) != 0)
                 ret = ERR_NOT_FOUND;
         }
         break;
@@ -481,34 +521,51 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
 
     case SYSCALL_RENAME:
         {
-            /* SI = old name offset, DI = new name offset (both in caller's DS) */
+            /* SI = old path offset, DI = new path offset (both in caller's DS) */
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static uint8_t old_83[12];
             static uint8_t new_83[12];
+            static uint16_t old_dir, new_dir;
+            static fat16_fs_t *old_fs, *new_fs;
 
-            name_to_83(caller_ds, si, old_83);
-            old_83[11] = '\0';
-            name_to_83(caller_ds, di, new_83);
-            new_83[11] = '\0';
+            if (resolve_user_path(caller_ds, si, &old_fs, &old_dir,
+                                  old_83) != 0
+                || resolve_user_path(caller_ds, di, &new_fs, &new_dir,
+                                     new_83) != 0) {
+                ret = ERR_NOT_FOUND;
+                break;
+            }
 
-            ret = fat16_rename(&root_fs, old_83, new_83);
+            /* Rename cannot move between directories or mounts */
+            if (old_fs != new_fs || old_dir != new_dir) {
+                ret = ERR_ACCESS_DENIED;
+                break;
+            }
+
+            ret = fat16_rename_in_dir(old_fs, old_dir, old_83, new_83);
         }
         break;
 
     case SYSCALL_STAT:
         {
-            /* DS:BX = filename, CX = pointer to fat16_dirent_t */
+            /* DS:BX = path, CX = pointer to fat16_dirent_t */
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static uint8_t name_83[12];
             static fat16_dirent_t dirent;
+            static uint16_t dir_cluster;
+            static fat16_fs_t *fs;
             uint16_t out_off = cx;
             uint16_t i;
             uint8_t *dp;
 
-            name_to_83(caller_ds, bx, name_83);
-            name_83[11] = '\0';
+            if (resolve_user_path(caller_ds, bx, &fs, &dir_cluster,
+                                  name_83) != 0) {
+                ret = ERR_NOT_FOUND;
+                break;
+            }
 
-            if (fat16_find(&root_fs, name_83, &dirent, NULL, NULL) != 0) {
+            if (fat16_find_in_dir(fs, dir_cluster, name_83, &dirent,
+                                  NULL, NULL) != 0) {
                 ret = ERR_NOT_FOUND;
                 break;
             }
@@ -526,50 +583,21 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
             /* CX = pointer to fat16_dir_t in user space */
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static fat16_dir_t dir;
+            static uint16_t dir_cluster;
             uint16_t out_off = cx;
-            static char cwd_path[VFS_MAX_CWD];
-            mount_entry_t *mnt;
-            static const char *rel;
             uint16_t i;
             uint8_t *dp;
 
-            /* Resolve CWD to determine if we're in root or subdirectory */
-            vfs_getcwd(cwd_path, VFS_MAX_CWD);
-
-            if (strcmp(cwd_path, "/") == 0) {
-                /* Root directory */
-                if (fat16_opendir(&root_fs, &dir) != 0) {
+            /* Resolve CWD (any depth) to root or a subdirectory cluster */
+            if (cwd_dir_cluster(&dir_cluster)) {
+                if (fat16_opendir_cluster(&root_fs, dir_cluster, &dir) != 0) {
                     ret = ERR_DISK_ERROR;
                     break;
                 }
             } else {
-                /* Subdirectory: resolve CWD to a cluster */
-                mnt = mount_resolve(cwd_path, &rel);
-                if (!mnt || !rel || !*rel) {
-                    /* Fall back to root if CWD is invalid */
-                    fat16_opendir(&root_fs, &dir);
-                } else {
-                    static uint8_t name_83[12];
-                    static fat16_dirent_t dirent;
-                    uint16_t j;
-
-                    for (j = 0; j < 11; j++) name_83[j] = ' ';
-                    for (j = 0; j < 8 && rel[j] != '\0' && rel[j] != '/'; j++) {
-                        uint8_t ch = (uint8_t)rel[j];
-                        if (ch >= 'a' && ch <= 'z') ch -= 32;
-                        name_83[j] = ch;
-                    }
-
-                    if (fat16_find(&mnt->fs, name_83, &dirent, NULL, NULL) != 0
-                        || !(dirent.attrs & FAT16_ATTR_DIRECTORY)) {
-                        /* Path not found or not a directory; fall back to root */
-                        fat16_opendir(&root_fs, &dir);
-                    } else {
-                        if (fat16_opendir_cluster(&root_fs, dirent.first_cluster, &dir) != 0) {
-                            ret = ERR_DISK_ERROR;
-                            break;
-                        }
-                    }
+                if (fat16_opendir(&root_fs, &dir) != 0) {
+                    ret = ERR_DISK_ERROR;
+                    break;
                 }
             }
 
@@ -630,9 +658,15 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
         {
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static uint8_t name_83[12];
-            name_to_83(caller_ds, bx, name_83);
-            name_83[11] = '\0';
-            ret = fat16_mkdir(&root_fs, name_83);
+            static uint16_t dir_cluster;
+            static fat16_fs_t *fs;
+
+            if (resolve_user_path(caller_ds, bx, &fs, &dir_cluster,
+                                  name_83) != 0) {
+                ret = ERR_NOT_FOUND;
+                break;
+            }
+            ret = fat16_mkdir_in_dir(fs, dir_cluster, name_83);
         }
         break;
 
@@ -640,9 +674,15 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
         {
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static uint8_t name_83[12];
-            name_to_83(caller_ds, bx, name_83);
-            name_83[11] = '\0';
-            ret = fat16_rmdir(&root_fs, name_83);
+            static uint16_t dir_cluster;
+            static fat16_fs_t *fs;
+
+            if (resolve_user_path(caller_ds, bx, &fs, &dir_cluster,
+                                  name_83) != 0) {
+                ret = ERR_NOT_FOUND;
+                break;
+            }
+            ret = fat16_rmdir_in_dir(fs, dir_cluster, name_83);
         }
         break;
 
@@ -780,49 +820,86 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
     /* Process mgmt (0x40-0x4F) */
     case SYSCALL_EXEC:
         {
-            /* BX = 8.3 filename offset (caller's DS).
-             * Search root first, then BIN/ subdirectory. */
+            /* BX = program name/path offset (caller's DS).
+             * Name with '/' → resolve that exact path.
+             * Bare name → search CWD, then root, then BIN/.
+             * Both forms also try with .COM auto-appended. */
             static uint8_t name_83[12];
+            static uint8_t with_ext[12];
             uint16_t reentry_off;
             static fat16_file_t file;
             static fat16_dirent_t bin_dirent;
+            static uint16_t dir_cluster;
+            static fat16_fs_t *exec_fs;
             uint16_t load_off;
+            uint16_t has_slash;
             uint16_t i;
 
-            name_to_83(caller_ds, bx, name_83);
-            name_83[11] = '\0';
-
-            /* Try root directory first */
-            if (fat16_open(&root_fs, name_83, &file) == 0)
-                goto load_and_exec;
-
-            /* Try BIN/ subdirectory */
-            {
-                static const uint8_t bin_name[] = "BIN        ";
-                uint16_t fr = fat16_find(&root_fs, bin_name, &bin_dirent, NULL, NULL);
-                if (fr == 0
-                    && (bin_dirent.attrs & FAT16_ATTR_DIRECTORY)) {
-                    if (fat16_open_in_dir(&root_fs, bin_dirent.first_cluster,
-                                         name_83, &file) == 0)
-                        goto load_and_exec;
+            has_slash = 0;
+            for (i = 0; ; i++) {
+                uint8_t c = read_far_b(caller_ds, bx + i);
+                if (c == '\0')
+                    break;
+                if (c == '/') {
+                    has_slash = 1;
+                    break;
                 }
             }
 
-            /* Also try with .COM extension appended (auto-append) */
-            {
-                static uint8_t with_ext[12];
-                for (i = 0; i < 8; i++)
-                    with_ext[i] = name_83[i];
-                with_ext[8] = 'C';
-                with_ext[9] = 'O';
-                with_ext[10] = 'M';
-                with_ext[11] = '\0';
+            if (has_slash) {
+                /* Explicit path: resolve directory, try exact then .COM */
+                if (resolve_user_path(caller_ds, bx, &exec_fs, &dir_cluster,
+                                      name_83) != 0) {
+                    ret = ERR_NOT_FOUND;
+                    break;
+                }
+            } else {
+                name_to_83(caller_ds, bx, name_83);
+                exec_fs = &root_fs;
+            }
 
-                if (fat16_open(&root_fs, with_ext, &file) == 0)
+            for (i = 0; i < 8; i++)
+                with_ext[i] = name_83[i];
+            with_ext[8] = 'C';
+            with_ext[9] = 'O';
+            with_ext[10] = 'M';
+            with_ext[11] = '\0';
+
+            if (has_slash) {
+                if (fat16_open_in_dir(exec_fs, dir_cluster, name_83,
+                                      &file) == 0)
                     goto load_and_exec;
+                if (fat16_open_in_dir(exec_fs, dir_cluster, with_ext,
+                                      &file) == 0)
+                    goto load_and_exec;
+                ret = ERR_NOT_FOUND;
+                break;
+            }
 
-                /* Try BIN/ with .COM extension */
-                if ((bin_dirent.attrs & FAT16_ATTR_DIRECTORY)) {
+            /* 1. Current working directory */
+            if (cwd_dir_cluster(&dir_cluster)) {
+                if (fat16_open_in_dir(&root_fs, dir_cluster, name_83,
+                                      &file) == 0)
+                    goto load_and_exec;
+                if (fat16_open_in_dir(&root_fs, dir_cluster, with_ext,
+                                      &file) == 0)
+                    goto load_and_exec;
+            }
+
+            /* 2. Root directory */
+            if (fat16_open(&root_fs, name_83, &file) == 0)
+                goto load_and_exec;
+            if (fat16_open(&root_fs, with_ext, &file) == 0)
+                goto load_and_exec;
+
+            /* 3. BIN/ subdirectory */
+            {
+                static const uint8_t bin_name[] = "BIN        ";
+                if (fat16_find(&root_fs, bin_name, &bin_dirent, NULL, NULL) == 0
+                    && (bin_dirent.attrs & FAT16_ATTR_DIRECTORY)) {
+                    if (fat16_open_in_dir(&root_fs, bin_dirent.first_cluster,
+                                          name_83, &file) == 0)
+                        goto load_and_exec;
                     if (fat16_open_in_dir(&root_fs, bin_dirent.first_cluster,
                                           with_ext, &file) == 0)
                         goto load_and_exec;
@@ -854,6 +931,15 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                     break;
                 }
             }
+
+            /* Zero the whole child slot first so the program's BSS
+             * (uninitialized globals, which live above the raw .COM image
+             * and are NOT part of the file) starts cleared. Otherwise a
+             * child inherits stale RAM from a previous child — e.g. EDIT's
+             * menu_wrap_flag comes up nonzero and its word-wrap layout
+             * loops. Word-fill for speed: PROC_PARAS<<4 bytes = <<3 words. */
+            for (i = 0; i < (uint16_t)(PROC_PARAS << 3); i++)
+                write_far_w(child_seg, (uint16_t)(i << 1), 0);
 
             /* Load file to child_seg:0x0100 sector by sector.
              * tmp must be static (SS!=DS: fat16_read uses DS-relative near ptr). */

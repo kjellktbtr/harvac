@@ -11,7 +11,7 @@ related:
   - "[[syscall-dispatch]]"
   - "[[plan]]"
 created: 2026-07-06
-updated: 2026-07-11
+updated: 2026-07-12
 confidence: high
 ---
 
@@ -69,6 +69,26 @@ The VFS dispatches file/directory operations through the mount table:
 2. If path is relative, prepend CWD then resolve as absolute
 3. Returns the mount entry and sets `rel_path` to the portion after the
    mount point
+
+### Multi-level directory resolution (2026-07-12)
+
+Three helpers make path handling work at any directory depth (previously the
+kernel only resolved one level below root):
+
+- `vfs_abspath(path, dst, len)` — normalize a possibly-relative path to a
+  canonical absolute path (collapses `.`, `..`, double slashes) against CWD.
+- `vfs_name_to_83(comp, out)` — pack a single path component into 8.3.
+- `vfs_resolve_dir(abs_path, &mnt, &dir_cluster)` — walk every component of an
+  absolute path from the mount root via `fat16_find_in_dir` (cluster 0 = root),
+  returning the final directory's first cluster. `vfs_chdir` now uses this so
+  nested directories (`/TMP/SUB`) validate correctly.
+
+These underpin the kernel-side `resolve_user_path()` in `syscalls.c`, which
+every path-taking syscall (`OPEN/CREATE/DELETE/MKDIR/RMDIR/STAT/RENAME`) now
+calls to split a user path into `{directory cluster, 8.3 name}` and dispatch to
+the matching `fat16_*_in_dir` variant. Before this, those syscalls only ever
+touched the **root** directory — `CREATE("/TMP/DEMO.BAT")` produced a root file
+literally named `/TMP/DEM.BAT` (the `name_to_83` bug that corrupted NCD copies).
 
 ### Filesystem Operations
 

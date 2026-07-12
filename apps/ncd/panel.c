@@ -87,14 +87,27 @@ void panel_done(panel_t *p)
 
 /* --- Panel refresh (read directory) --- */
 
+/* Forward declaration */
+static void panel_clamp_scroll(panel_t *p);
+
+/* Re-enter the panel's own directory. The kernel CWD is a single global
+ * shared by both panels (and child programs), so every operation that
+ * resolves names must sync it to the panel's directory first. */
+void panel_sync_cwd(panel_t *p)
+{
+    if (p->cwd[0] != '\0')
+        ncd_chdir(p->cwd);
+}
+
 void panel_refresh(panel_t *p)
 {
     ncd_dir_t dir;
     ncd_dirent_t ent;
     panel_entry_t entry;
-    u16 vis;
 
-    /* Get current directory */
+    /* Re-enter this panel's directory, then read back the (possibly
+     * corrected) canonical CWD */
+    panel_sync_cwd(p);
     ncd_getcwd(p->cwd, sizeof(p->cwd));
 
     p->count = 0;
@@ -129,9 +142,7 @@ void panel_refresh(panel_t *p)
         p->scroll = 0;
     } else {
         if (p->sel >= p->count) p->sel = p->count - 1;
-        vis = panel_get_visible(p);
-        if (p->sel < p->scroll) p->scroll = p->sel;
-        if (p->scroll + vis > p->count) p->scroll = p->count - vis;
+        panel_clamp_scroll(p);
     }
 }
 
@@ -254,7 +265,11 @@ int panel_enter_dir(panel_t *p)
     if (p->sel < p->count) {
         panel_entry_get(p, p->sel, &e);
         if (e.is_dir) {
+            panel_sync_cwd(p);
             ncd_chdir(e.name);
+            ncd_getcwd(p->cwd, sizeof(p->cwd));
+            p->sel = 0;
+            p->scroll = 0;
             panel_refresh(p);
             return 1;
         }
@@ -265,6 +280,7 @@ int panel_enter_dir(panel_t *p)
 void panel_parent_dir(panel_t *p)
 {
     char cwd[PATH_MAX];
+    panel_sync_cwd(p);
     ncd_getcwd(cwd, sizeof(cwd));
 
     /* If not at root, go up one level */
@@ -313,110 +329,106 @@ void render_pane_borders(void)
     vid_putat(20, 40, BOX_BJ, A_NORMAL);
 }
 
-#if 0
-static void pad_right(char *buf, u16 target)
-{
-    u16 len = (u16)strlen(buf);
-    while (len < target) {
-        buf[len++] = ' ';
-    }
-    buf[len] = '\0';
-}
-#endif
-
 void panel_render(panel_t *p, int pane_id)
 {
     int left_col = pane_id == PANEL_LEFT ? 1 : 41;
-    int right_col = pane_id == PANEL_LEFT ? 39 : 79;
-    int path_row = ROW_PATH;
-    int header_row = ROW_HEADER;
+    /* interior width: left pane has a spare column before the divider */
+    int inner = pane_id == PANEL_LEFT ? 39 : 38;
+    int is_active = ((u8)pane_id == active_panel);
     int file_start = ROW_FILE_FIRST;
     int file_end = ROW_FILE_LAST;
     int vis_rows = file_end - file_start + 1;
 
     u16 i, r;
-    char tmp[32];
-    char dt_buf[16];
+    char tmp[16];
     u8 attr;
+    u8 name_attr;
     panel_entry_t e;
 
-    /* Clear pane area */
-    for (r = file_start; r <= (u16)file_end; r++)
-        vid_fill(r, left_col, right_col - left_col + 1, ' ', A_NORMAL);
-
     /* Directory path header (row 1) */
-    vid_fill(path_row, left_col, right_col - left_col + 1, ' ', A_PATH);
-    vid_puts(path_row, left_col, p->cwd, A_PATH);
+    vid_fill(ROW_PATH, left_col, inner, ' ', A_PATH);
+    vid_puts(ROW_PATH, left_col, p->cwd, A_PATH);
 
-    /* Column headers (row 2) */
-    vid_fill(header_row, left_col, right_col - left_col + 1, ' ', A_HEADER);
-    vid_puts(header_row, left_col + 1, "NAME", A_HEADER);
-    vid_puts(header_row, left_col + 1 + COL_NAME_WIDTH, "SIZE", A_HEADER);
-    vid_puts(header_row, left_col + 1 + COL_NAME_WIDTH + COL_SIZE_WIDTH,
-             "DATE/TIME", A_HEADER);
+    /* Column headers (row 2): |NAME        |SIZE |DATE      |TIME | */
+    vid_fill(ROW_HEADER, left_col, inner, ' ', A_HEADER);
+    vid_putat(ROW_HEADER, left_col + P_SEP0, '|', A_HEADER);
+    vid_puts(ROW_HEADER, left_col + P_NAME, "NAME", A_HEADER);
+    vid_putat(ROW_HEADER, left_col + P_SEP1, '|', A_HEADER);
+    vid_puts(ROW_HEADER, left_col + P_SIZE, "SIZE", A_HEADER);
+    vid_putat(ROW_HEADER, left_col + P_SEP2, '|', A_HEADER);
+    vid_puts(ROW_HEADER, left_col + P_DATE, "DATE", A_HEADER);
+    vid_putat(ROW_HEADER, left_col + P_SEP3, '|', A_HEADER);
+    vid_puts(ROW_HEADER, left_col + P_TIME, "TIME", A_HEADER);
+    vid_putat(ROW_HEADER, left_col + P_SEP4, '|', A_HEADER);
 
     /* File entries */
-    for (i = 0; i < (u16)vis_rows && (i + p->scroll) < p->count; i++) {
+    for (i = 0; i < (u16)vis_rows; i++) {
         r = (u16)(file_start + i);
+
+        if ((u16)(i + p->scroll) >= p->count) {
+            vid_fill(r, left_col, inner, ' ', A_NORMAL);
+            continue;
+        }
+
         panel_entry_get(p, p->scroll + i, &e);
 
-        /* Determine attribute */
-        if (p->scroll + i == p->sel) {
+        /* Cursor bar only in the active panel (shows which pane has focus) */
+        if (is_active && p->scroll + i == p->sel) {
             attr = A_SELECTED;
         } else if (e.is_dir) {
             attr = A_DIR;
         } else {
             attr = A_FILE;
         }
+        /* Ins-selected entries keep their marker color in both panes */
+        name_attr = e.selected ? A_MARKER : attr;
 
-        /* Clear this row */
-        vid_fill(r, left_col, right_col - left_col + 1, ' ', attr);
+        /* Clear this row and draw column separators */
+        vid_fill(r, left_col, inner, ' ', attr);
+        vid_putat(r, left_col + P_SEP0, '|', attr);
+        vid_putat(r, left_col + P_SEP1, '|', attr);
+        vid_putat(r, left_col + P_SEP2, '|', attr);
+        vid_putat(r, left_col + P_SEP3, '|', attr);
+        vid_putat(r, left_col + P_SEP4, '|', attr);
 
-        /* Selection marker */
-        if (e.selected) {
-            vid_putat(r, left_col, '*', A_MARKER);
-        } else {
-            vid_putat(r, left_col, ' ', attr);
-        }
+        /* Name column: "NNNNNNNN EXT" */
+        ncd_format_name12(e.name, tmp);
+        vid_puts(r, left_col + P_NAME, tmp, name_attr);
 
-        /* Name column */
-        vid_puts(r, left_col + 2, e.name, attr);
-
-        /* Size column */
+        /* Size column (right-aligned 5) */
         if (e.is_dir) {
-            vid_puts(r, left_col + 2 + COL_NAME_WIDTH, "<DIR>", attr);
+            vid_puts(r, left_col + P_SIZE, "<DIR>", attr);
         } else {
-            m_u32toa(e.size, tmp);
-            vid_puts(r, left_col + 2 + COL_NAME_WIDTH, tmp, attr);
+            m_format_size(e.size, tmp);
+            vid_puts(r, left_col + P_SIZE, tmp, attr);
         }
 
-        /* Date/time column */
-        ncd_format_datetime(e.date, e.time, dt_buf, sizeof(dt_buf));
-        vid_puts(r, left_col + 2 + COL_NAME_WIDTH + COL_SIZE_WIDTH, dt_buf, attr);
+        /* Date / time columns */
+        ncd_format_date(e.date, tmp);
+        vid_puts(r, left_col + P_DATE, tmp, attr);
+        ncd_format_time(e.date, e.time, tmp);
+        vid_puts(r, left_col + P_TIME, tmp, attr);
     }
 }
 
 /* --- UI Chrome --- */
 
-void render_menu_bar(void)
+/* Norton-style F-key bar on the bottom row: number in normal video,
+ * label in inverse video. */
+void render_fkey_bar(void)
 {
-    vid_fill(ROW_MENU, 0, COLS, ' ', A_MENU);
-    vid_puts(ROW_MENU, 1, " F3:View  F4:Edit  F5:Copy  F6:Move  F7:Mkdir  F8:Del  F10:Quit",
-             A_MENU_KEY);
-}
+    static const char *nums[]   = { "3", "4", "5", "6", "7", "8", "10" };
+    static const char *labels[] = { "View  ", "Edit  ", "Copy  ", "RenMov",
+                                    "MkDir ", "Delete", "Quit  " };
+    u16 col = 1;
+    u16 i;
 
-void render_separator(void)
-{
-    int c;
-    for (c = 0; c < COLS; c++) {
-        if (c == 0)
-            vid_putat(ROW_SEP, c, BOX_TL, A_SEPARATOR);
-        else if (c == COLS - 1)
-            vid_putat(ROW_SEP, c, BOX_TR, A_SEPARATOR);
-        else if (c == 40)
-            vid_putat(ROW_SEP, c, BOX_LJ, A_SEPARATOR);
-        else
-            vid_putat(ROW_SEP, c, BOX_H, A_SEPARATOR);
+    vid_fill(ROW_FKEYS, 0, COLS, ' ', A_NORMAL);
+    for (i = 0; i < 7; i++) {
+        vid_puts(ROW_FKEYS, col, nums[i], A_NORMAL);
+        col += (u16)strlen(nums[i]);
+        vid_puts(ROW_FKEYS, col, labels[i], A_INVERSE);
+        col += (u16)strlen(labels[i]) + 2;
     }
 }
 
@@ -443,12 +455,4 @@ void render_status_line(void)
     strcat(tmp, sc_buf);
 
     vid_puts(ROW_STATUS, 1, tmp, A_STATUS_HI);
-}
-
-void render_help_line(void)
-{
-    vid_fill(ROW_HELP, 0, COLS, ' ', A_NORMAL);
-    vid_puts(ROW_HELP, 1,
-             "Arrows:Navigate  Enter:OpenDir  Bs:Parent  Tab:Switch  Ins:Select  F10:Quit",
-             A_NORMAL);
 }

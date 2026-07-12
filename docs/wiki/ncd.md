@@ -16,7 +16,7 @@ related:
   - "[[medit-harvac]]"
   - "[[com-executor]]"
 created: 2026-07-11
-updated: 2026-07-11
+updated: 2026-07-12
 confidence: high
 ---
 
@@ -30,14 +30,36 @@ Runs as a .COM program from the shell.
 ### Screen Layout
 
 80×25 VGA text mode, split into two 40-column panes with a vertical divider.
-Bottom area has status line (row 21) and help line (row 22). F-key menu bar
-at row 0 with F3–F8, F10 Quick reference.
+Row map (`apps/ncd/ncd.h`, reworked 2026-07-12):
+
+| Rows | Content |
+|------|---------|
+| 0 | Top pane border |
+| 1 | Directory path per pane |
+| 2 | Column header `\|NAME\|SIZE\|DATE\|TIME\|` |
+| 3–19 | File entries (17 rows) |
+| 20 | Bottom pane border |
+| 21 | Status line (`[Left]/[Right]`, selection count) |
+| 22 | Transient messages (e.g. "2 copied") |
+| 23 | Command line (`<cwd>>`) |
+| 24 | F-key bar, inverted video (`render_fkey_bar()`) |
+
+Per pane, the 37-column table is `|NAME 12|SIZE 5|DATE 10|TIME 5|`. Files show
+the name as `NNNNNNNN EXT` (`ncd_format_name12`), size right-aligned with a `K`
+suffix above 99999 (`m_format_size`), date `YYYY.MM.DD` (`ncd_format_date`) and
+time `HH:MM` (`ncd_format_time`); zero FAT timestamps render blank. The cursor
+bar (`A_SELECTED`) is drawn **only in the active pane** so focus is obvious;
+`Ins`-marked entries use `A_MARKER` in both panes.
+
+The old top F-key menu bar (row 0) was removed — it was drawn under the pane
+border and never visible.
 
 ### Far Memory Layout
 
-Each process slot is 16 KB (`PROC_PARAS` = 0x400 paragraphs). NCD's DGROUP
-would exceed this with inline arrays, so panel entries and the file viewer
-buffer live in far segments allocated via `SYSCALL_ALLOC`:
+Each process slot is 24 KB (`PROC_PARAS` = 0x600 paragraphs, raised from
+0x400 on 2026-07-12 — see [[com-executor]]). NCD's DGROUP would exceed a slot
+with inline arrays, so panel entries and the file viewer buffer live in far
+segments allocated via `SYSCALL_ALLOC`:
 
 | Segment | Size | Paragraphs | Allocated by |
 |---------|------|------------|-------------|
@@ -45,8 +67,7 @@ buffer live in far segments allocated via `SYSCALL_ALLOC`:
 | Right pane entries | 512 × 24 B = 12,288 B | 768 | `panel_init()` |
 | Viewer buffer | 4,096 B | 256 | `viewer_open()` |
 
-After allocations, DGROUP ≈ 8 KB (code + BSS), leaving ~3 KB stack headroom
-below the 16 KB slot limit.
+After allocations, DGROUP ≈ 8 KB (code + BSS), well within the 24 KB slot.
 
 ### Entry Accessors
 
@@ -96,6 +117,69 @@ accessing uninitialized far segments → crash.
 
 **Fix:** Moved `_main` to be the first function definition with forward
 declarations for all static helpers.
+
+### Bug 4: Scroll-clamp underflow made initial render blank (`panel.c`)
+
+`panel_refresh()` clamped scroll with `p->scroll = p->count - vis` which
+underflows when `p->count < vis` (e.g. 10 < 16 → 65530). Replaced with
+`panel_clamp_scroll()` which handles the `count <= vis` case.
+
+### Bug 5: Tab key didn't switch panes (`keyboard.c`)
+
+Scancode 0x0F (Tab) had no ASCII translation in the kernel keyboard driver.
+Changed both scancode tables from 0 to `'\t'` (0x09).
+
+### Bug 6: Garbled cp437 chars in DATE/TIME column (`str.c`)
+
+`m_itoa()` and `m_u32toa()` left uninitialized bytes in the output buffer
+(stack garbage → smileys, card suits). Rewritten with clean right-to-left
+fill.
+
+### Bug 7: Date/time always 0-0-0 (`build.py`, `fs.c`)
+
+FAT16 image writer left time/date fields zero. Added `_fat16_datetime()`
+helper and writes entry[22:26] from mtime or current time. `ncd_format_datetime()`
+shows blank when date=time=0.
+
+### Bug 8: F3 viewer had no scroll support (`viewer.c`)
+
+Added `viewer_scroll`, `count_lines()`, and Up/Down/PgUp/PgDn/Home/End
+handlers. Status line shows "Ln N/M".
+
+### Bug 9: F3 on folders was a no-op (`main.c`)
+
+`handle_f3()` now calls `panel_enter_dir()` for directories.
+
+### Bug 10: Enter on .BAT/.COM did nothing; couldn't type commands (`main.c`, `str.c`)
+
+Added `m_ends_with()`. K_ENTER launches .BAT via SHELL.COM and .COM
+directly. Printable characters open the shell prompt pre-filled.
+
+## Round 2 fixes (2026-07-12)
+
+A second test pass found the earlier "F4 in a subdirectory opens an empty
+file" and "copy makes /TMP/DEM.BAT" symptoms traced mostly to the **kernel**,
+not NCD. See [[vfs-layer]] and [[com-executor]] for the kernel side.
+
+| # | Symptom | Fix |
+|---|---------|-----|
+| 1 | F4 in `/DOCS` opened an empty file | Panels now `panel_sync_cwd()` before every op so the kernel CWD matches the pane; kernel resolves subdir paths (see [[vfs-layer]]) |
+| 2 | Copy `DEMO.BAT` → `/TMP/DEM.BAT` (corrupt) | Kernel `name_to_83`/`resolve_user_path` fix; `_in_dir` FAT16 ops write to the right directory |
+| 3 | F-key bar not visible | Row map reworked; `render_fkey_bar()` on row 24 (inverted) |
+| 4 | No NCD manual | `os-docs/NCD.md` → `DOCS/NCD.TXT` (see [[on-image-docs]]) |
+| 5 | F3 on a folder did nothing | `handle_f3` enters the directory |
+| 6 | Copy needed confirmation | `dlg_msgbox("Copy … to …?", DB_JNA)` before F5 copies |
+| 7 | Second copy froze | `SYSCALL_READ/WRITE` bounce buffers 32 B → 512 B (see [[com-executor]]) |
+| 8 | Cursor bar shown in both panes | `panel_render` draws `A_SELECTED` only in the active pane |
+| 9 | No "new file" command | Shift-F4: `dlg_input` name → `ncd_create` → open EDIT |
+| 10 | DATE/TIME overflowed the pane | New `\|NAME\|SIZE\|DATE\|TIME\|` column layout; `ncd_format_name12/date/time`, `m_format_size`, `m_itoa_pad2` |
+| 11 | Typed commands did nothing | `SHELL.COM` gained one-shot mode (runs its PSP command tail then exits); NCD command line and Enter-launch clear the screen, run, and wait for a key |
+| 12 | Enter on `.COM`/`.BAT` didn't run | Kernel `SYSCALL_EXEC` searches the CWD (see [[com-executor]]); `.BAT` runs via `SHELL.COM <name>` |
+
+The most subtle fix was unrelated to NCD proper: EDIT hung on multi-line files
+because the 16 KB process slot was too small for its near BSS, which then
+collided with its far gap buffer — see the `PROC_PARAS` note in
+[[com-executor]].
 
 ## Source Files
 

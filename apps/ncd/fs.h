@@ -48,8 +48,14 @@ void ncd_exit(void);
 /* Format FAT16 8.3 name to readable string */
 void ncd_format_name(const ncd_dirent_t *ent, char *buf, u16 maxlen);
 
-/* Format FAT16 date/time words to readable string */
-void ncd_format_datetime(u16 date, u16 time, char *buf, u16 maxlen);
+/* Format "FILE.TXT" as "FILE     TXT" (8+1+3 cols); buf >= 13 bytes */
+void ncd_format_name12(const char *name, char *buf);
+
+/* Format FAT16 date word as "YYYY.MM.DD" (blank if zero); buf >= 11 bytes */
+void ncd_format_date(u16 date, char *buf);
+
+/* Format FAT16 time word as "HH:MM" (blank if no timestamp); buf >= 6 bytes */
+void ncd_format_time(u16 date, u16 time, char *buf);
 
 /* Check if dirent name is "." or ".." (current/parent directory) */
 int ncd_is_dot_entry(const ncd_dirent_t *ent);

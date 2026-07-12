@@ -45,7 +45,7 @@ static uint8_t ext_prefix;
  */
 static const char scancode_ascii[128] = {
     0,   0,   '1', '2', '3', '4', '5', '6', /* 00-07 */
-    '7', '8', '9', '0', '-', '=', '\b', 0,  /* 08-0F  0x0E=Backspace */
+    '7', '8', '9', '0', '-', '=', '\b', '\t',  /* 08-0F  0x0E=Backspace, 0x0F=Tab */
     'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', /* 10-17 */
     'o', 'p', '[', ']', '\r', 0,  'a', 's', /* 18-1F  0x1C=Enter */
     'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', /* 20-27 */
@@ -65,7 +65,7 @@ static const char scancode_ascii[128] = {
 /* Shifted scancode to ASCII */
 static const char scancode_ascii_shift[128] = {
     0,   0,   '!', '@', '#', '$', '%', '^', /* 00-07 */
-    '&', '*', '(', ')', '_', '+', '\b', 0,  /* 08-0F  0x0E=Backspace */
+    '&', '*', '(', ')', '_', '+', '\b', '\t',  /* 08-0F  0x0E=Backspace, 0x0F=Tab */
     'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', /* 10-17 */
     'O', 'P', '{', '}', '\r', 0,  'A', 'S', /* 18-1F  0x1C=Enter */
     'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', /* 20-27 */

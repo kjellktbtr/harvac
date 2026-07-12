@@ -88,12 +88,15 @@
   themselves are still zero (no RTC); that part stays open under `No RTC
   driver`.
 
-- [ ] **SYSCALL_CREATE/DELETE are root-only** — SYSCALL_OPEN is CWD-aware
+- [x] **SYSCALL_CREATE/DELETE are root-only** — SYSCALL_OPEN is CWD-aware
   since 2026-07-11 (cwd_dir_cluster helper), but CREATE and DELETE still
   operate on the root directory, so `>` redirect and `touch`/`rm` in a
   subdirectory silently act on the root. Extend them with the same helper.
   (Also gates XFER: PWRITE refuses creating outside the root, and
   DEL/RMD/REN over the mount only work on root entries.)
+  *Resolved 2026-07-12:* added `resolve_user_path()` + FAT16 `*_in_dir`
+  variants; OPEN/CREATE/DELETE/MKDIR/RMDIR/STAT/RENAME now honor the CWD and
+  absolute subdirectory paths at any depth. See [[vfs-layer]].
 
 - [x] **XFER: GET/PREAD/PWRITE ignored the directory part of paths** —
   mountfs.py reads files via T_PREAD with full paths (`\DOCS\MANUAL.TXT`);
@@ -162,8 +165,22 @@
   been verified in QEMU as a standalone .COM. Add a `make test` case that
   execs a directory-listing app.
 
-- [ ] **Shell cannot exec .COM files from subdirectories** — vfs_resolve
+- [x] **Shell cannot exec .COM files from subdirectories** — vfs_resolve
   extracts only the filename from resolved paths, discarding the directory
   part. `bin/ncd` is not found; the user must `cd bin` first (which itself
   may fail due to CHDIR issues with subdirectories). A PATH-like search or
   proper subdirectory .COM resolution is needed.
+  *Resolved 2026-07-12:* `SYSCALL_EXEC` resolves a name containing `/` as an
+  explicit path and searches bare names in CWD → root → `/BIN` (each with
+  `.COM` auto-append). Subdirectory CHDIR at any depth now works too. See
+  [[com-executor]].
+
+- [x] **EDIT hung on multi-line files (process slot too small)** — EDIT.COM's
+  near data reaches ~0x40E8, just past the old 16 KB (`PROC_PARAS=0x400`)
+  process slot. Since a program's `SYSCALL_ALLOC` far blocks start at
+  `child_seg+PROC_PARAS`, EDIT's near BSS aliased its own far gap buffer;
+  loading a file overwrote `menu_wrap_flag` (nonzero → word-wrap layout loop).
+  Reproduced on the untouched baseline from a plain shell, so pre-existing.
+  *Resolved 2026-07-12:* raised `PROC_PARAS` to 0x600 (24 KB) and `PROC_SP` to
+  0x5FFE, and `SYSCALL_EXEC` now zeroes the child slot before loading so BSS
+  starts clean. See [[com-executor]].

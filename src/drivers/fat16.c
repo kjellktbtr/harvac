@@ -211,6 +211,10 @@ uint16_t fat16_find_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
 {
     uint16_t cluster = dir_cluster;
 
+    /* dir_cluster 0 = root directory (fixed area, not a cluster chain) */
+    if (dir_cluster == 0)
+        return fat16_find(fs, name, dirent, out_sector_lba, out_entry_offset);
+
     while (cluster >= 2 && cluster < FAT16_EOF_MIN) {
         uint32_t sector_lba = fs->data_lba + (uint32_t)(cluster - 2);
         uint16_t i;
@@ -694,58 +698,128 @@ uint16_t fat16_write(fat16_file_t *file, const uint8_t *buffer, uint16_t count)
     return total_written;
 }
 
-/* ─── Create a new file in root directory ─── */
-uint16_t fat16_create(fat16_fs_t *fs, const uint8_t *name,
-                       fat16_file_t *file)
+/* ─── Find (or make) a free directory entry slot ─── */
+/* dir_cluster 0 = root (fixed area; a full root fails with ERR_NO_MEMORY).
+ * For subdirectories the cluster chain is extended with a zeroed cluster
+ * when no free slot exists.
+ * Postcondition on success: sec_buf holds the sector at *out_sector_lba. */
+static uint16_t fat16_dir_free_slot(fat16_fs_t *fs, uint16_t dir_cluster,
+                                    uint32_t *out_sector_lba,
+                                    uint16_t *out_entry_offset)
 {
-    uint16_t root_sectors;
-    uint16_t sec;
     uint16_t i;
-    uint16_t first_free_entry = 0;
-    uint32_t free_sector_lba = 0;
-    uint16_t free_entry_offset = 0;
-    uint8_t found_free = 0;
+
+    if (dir_cluster == 0) {
+        uint16_t root_sectors;
+        uint16_t sec;
+
+        root_sectors = (uint16_t)((fs->root_entries * 32
+                                   + fs->bytes_per_sector - 1)
+                                  / fs->bytes_per_sector);
+
+        for (sec = 0; sec < root_sectors; sec++) {
+            if (disk_read_sectors(fs->drive, fs->root_dir_lba + sec, 1,
+                                  KERNEL_SEGMENT, (uint16_t)sec_buf) != 0)
+                return ERR_DISK_ERROR;
+
+            for (i = 0; i < 16; i++) {
+                fat16_dirent_t *de = (fat16_dirent_t *)(sec_buf + i * 32);
+
+                if (de->name[0] == 0x00 || de->name[0] == 0xE5) {
+                    *out_sector_lba = fs->root_dir_lba + sec;
+                    *out_entry_offset = (uint16_t)(i * 32);
+                    return 0;
+                }
+            }
+        }
+        return ERR_NO_MEMORY;  /* root directory full */
+    }
+
+    /* Subdirectory: walk the cluster chain */
+    {
+        uint16_t cluster = dir_cluster;
+        uint16_t prev = dir_cluster;
+
+        while (cluster >= 2 && cluster < FAT16_EOF_MIN) {
+            uint32_t sector_lba = fs->data_lba + (uint32_t)(cluster - 2);
+
+            if (disk_read_sectors(fs->drive, sector_lba, 1,
+                                  KERNEL_SEGMENT, (uint16_t)sec_buf) != 0)
+                return ERR_DISK_ERROR;
+
+            for (i = 0; i < 16; i++) {
+                fat16_dirent_t *de = (fat16_dirent_t *)(sec_buf + i * 32);
+
+                if (de->name[0] == 0x00 || de->name[0] == 0xE5) {
+                    *out_sector_lba = sector_lba;
+                    *out_entry_offset = (uint16_t)(i * 32);
+                    return 0;
+                }
+            }
+
+            prev = cluster;
+            cluster = fat16_read_fat(fs, cluster);
+        }
+
+        /* Chain full: extend the directory with a zeroed cluster */
+        {
+            uint16_t new_cluster = fat16_find_free_cluster(fs);
+            uint32_t sector_lba;
+            uint16_t j;
+
+            if (new_cluster == FAT16_BAD)
+                return ERR_NO_MEMORY;
+            if (fat16_write_fat(fs, prev, new_cluster) != 0)
+                return ERR_DISK_ERROR;
+            if (fat16_write_fat(fs, new_cluster, FAT16_EOF_MIN) != 0)
+                return ERR_DISK_ERROR;
+
+            sector_lba = fs->data_lba + (uint32_t)(new_cluster - 2);
+            for (j = 0; j < 512; j++)
+                sec_buf[j] = 0;
+            if (disk_write_sectors(fs->drive, sector_lba, 1,
+                                   KERNEL_SEGMENT, (uint16_t)sec_buf) != 0)
+                return ERR_DISK_ERROR;
+
+            *out_sector_lba = sector_lba;
+            *out_entry_offset = 0;
+            return 0;
+        }
+    }
+}
+
+/* ─── Create a new file in a directory (0 = root) ─── */
+uint16_t fat16_create_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                             const uint8_t *name, fat16_file_t *file)
+{
+    uint32_t free_sector_lba;
+    uint16_t free_entry_offset;
     uint16_t cluster;
+    uint16_t ret;
 
     /* First check if file already exists */
     {
         fat16_dirent_t tmp;
-        if (fat16_find(fs, name, &tmp, NULL, NULL) == 0)
+        if (fat16_find_in_dir(fs, dir_cluster, name, &tmp, NULL, NULL) == 0)
             return ERR_FILE_EXISTS;
     }
 
-    /* Allocate a cluster */
+    /* Allocate a cluster for the file data; mark it end-of-chain right
+     * away so a directory-extension allocation below cannot hand out the
+     * same cluster. */
     cluster = fat16_find_free_cluster(fs);
     if (cluster == FAT16_BAD)
         return ERR_NO_MEMORY;
+    if (fat16_write_fat(fs, cluster, FAT16_EOF_MIN) != 0)
+        return ERR_DISK_ERROR;
 
-    root_sectors = (uint16_t)((fs->root_entries * 32
-                               + fs->bytes_per_sector - 1)
-                              / fs->bytes_per_sector);
-
-    /* Scan root directory for a free entry */
-    for (sec = 0; sec < root_sectors; sec++) {
-        if (disk_read_sectors(fs->drive, fs->root_dir_lba + sec, 1,
-                              KERNEL_SEGMENT, (uint16_t)sec_buf) != 0)
-            return ERR_DISK_ERROR;
-
-        for (i = 0; i < 16; i++) {
-            fat16_dirent_t *de = (fat16_dirent_t *)(sec_buf + i * 32);
-
-            if (de->name[0] == 0x00 || de->name[0] == 0xE5) {
-                /* Free slot found */
-                free_sector_lba = fs->root_dir_lba + sec;
-                free_entry_offset = (uint16_t)(i * 32);
-                found_free = 1;
-                break;
-            }
-        }
-        if (found_free)
-            break;
+    /* Find a free directory slot (leaves that sector in sec_buf) */
+    ret = fat16_dir_free_slot(fs, dir_cluster, &free_sector_lba,
+                              &free_entry_offset);
+    if (ret != 0) {
+        fat16_write_fat(fs, cluster, FAT16_FREE);
+        return ret;
     }
-
-    if (!found_free)
-        return ERR_NO_MEMORY;  /* directory full */
 
     /* Fill in the directory entry */
     {
@@ -778,10 +852,6 @@ uint16_t fat16_create(fat16_fs_t *fs, const uint8_t *name,
                            (uint16_t)sec_buf) != 0)
         return ERR_DISK_ERROR;
 
-    /* Mark cluster as end-of-chain in FAT */
-    if (fat16_write_fat(fs, cluster, FAT16_EOF_MIN) != 0)
-        return ERR_DISK_ERROR;
-
     /* Initialize file handle */
     file->fs = fs;
     file->first_cluster = cluster;
@@ -795,14 +865,23 @@ uint16_t fat16_create(fat16_fs_t *fs, const uint8_t *name,
     return 0;
 }
 
-/* ─── Delete a file from root directory ─── */
-uint16_t fat16_delete(fat16_fs_t *fs, const uint8_t *name)
+/* ─── Create a new file in root directory ─── */
+uint16_t fat16_create(fat16_fs_t *fs, const uint8_t *name,
+                       fat16_file_t *file)
+{
+    return fat16_create_in_dir(fs, 0, name, file);
+}
+
+/* ─── Delete a file from a directory (0 = root) ─── */
+uint16_t fat16_delete_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                             const uint8_t *name)
 {
     fat16_dirent_t dirent;
     uint32_t sector_lba;
     uint16_t entry_offset;
 
-    if (fat16_find(fs, name, &dirent, &sector_lba, &entry_offset) != 0)
+    if (fat16_find_in_dir(fs, dir_cluster, name, &dirent,
+                          &sector_lba, &entry_offset) != 0)
         return ERR_NOT_FOUND;
 
     /* Read the directory sector */
@@ -824,99 +903,76 @@ uint16_t fat16_delete(fat16_fs_t *fs, const uint8_t *name)
     return 0;
 }
 
-/* ─── Create a directory ─── */
-uint16_t fat16_mkdir(fat16_fs_t *fs, const uint8_t *name)
+/* ─── Delete a file from root directory ─── */
+uint16_t fat16_delete(fat16_fs_t *fs, const uint8_t *name)
 {
-    uint16_t root_sectors;
-    uint16_t sec;
-    uint16_t i;
-    uint16_t first_free_entry = 0;
-    uint32_t free_sector_lba = 0;
-    uint16_t free_entry_offset = 0;
-    uint8_t found_free = 0;
+    return fat16_delete_in_dir(fs, 0, name);
+}
+
+/* ─── Create a directory inside a directory (parent 0 = root) ─── */
+uint16_t fat16_mkdir_in_dir(fat16_fs_t *fs, uint16_t parent_cluster,
+                            const uint8_t *name)
+{
+    uint32_t free_sector_lba;
+    uint16_t free_entry_offset;
     uint16_t cluster;
+    uint16_t ret;
 
     /* Check if name already exists */
     {
         fat16_dirent_t tmp;
-        if (fat16_find(fs, name, &tmp, NULL, NULL) == 0)
+        if (fat16_find_in_dir(fs, parent_cluster, name, &tmp, NULL, NULL) == 0)
             return ERR_FILE_EXISTS;
     }
 
-    /* Allocate a cluster */
+    /* Allocate the directory's cluster; mark end-of-chain right away so a
+     * parent-extension allocation below cannot hand out the same cluster. */
     cluster = fat16_find_free_cluster(fs);
     if (cluster == FAT16_BAD)
         return ERR_NO_MEMORY;
+    if (fat16_write_fat(fs, cluster, FAT16_EOF_MIN) != 0)
+        return ERR_DISK_ERROR;
 
-    root_sectors = (uint16_t)((fs->root_entries * 32
-                               + fs->bytes_per_sector - 1)
-                              / fs->bytes_per_sector);
-
-    /* Scan root directory for a free entry */
-    for (sec = 0; sec < root_sectors; sec++) {
-        if (disk_read_sectors(fs->drive, fs->root_dir_lba + sec, 1,
-                              KERNEL_SEGMENT, (uint16_t)sec_buf) != 0)
-            return ERR_DISK_ERROR;
-
-        for (i = 0; i < 16; i++) {
-            fat16_dirent_t *de = (fat16_dirent_t *)(sec_buf + i * 32);
-
-            if (de->name[0] == 0x00 || de->name[0] == 0xE5) {
-                free_sector_lba = fs->root_dir_lba + sec;
-                free_entry_offset = (uint16_t)(i * 32);
-                found_free = 1;
-                break;
-            }
-        }
-        if (found_free)
-            break;
-    }
-
-    if (!found_free)
-        return ERR_NO_MEMORY;
-
-    /* Initialize the new cluster with "." and ".." entries.
-     * Read the cluster's first sector to get sec_buf. */
+    /* Initialize the new cluster with "." and ".." entries */
     {
         uint32_t cluster_lba = fs->data_lba + (uint32_t)(cluster - 2);
-        uint8_t  j;
+        uint16_t j;
 
-        /* Read (or just clear) the first sector of the new cluster */
-        if (disk_read_sectors(fs->drive, cluster_lba, 1, KERNEL_SEGMENT,
-                              (uint16_t)sec_buf) != 0)
-            return ERR_DISK_ERROR;
-
-        /* Clear the whole sector to make sure unused entries are 0x00 */
-        for (j = 0; j < 32; j++)
+        /* Clear the whole sector so unused entries are 0x00 */
+        for (j = 0; j < 512; j++)
             sec_buf[j] = 0;
 
-        /* Entry 0: "." name = zero-padded spaces */
-        for (j = 0; j < 8; j++) sec_buf[j] = ' ';
-        sec_buf[0] = '.';                        /* first byte of name */
-        for (j = 0; j < 3; j++) sec_buf[8 + j] = ' ';   /* ext = spaces */
+        /* Entry 0: "." -> this directory */
+        for (j = 0; j < 11; j++) sec_buf[j] = ' ';
+        sec_buf[0] = '.';
         sec_buf[11] = FAT16_ATTR_DIRECTORY;
-        /* first_cluster = cluster (little-endian) */
         sec_buf[26] = (uint8_t)(cluster & 0xFF);
         sec_buf[27] = (uint8_t)(cluster >> 8);
-        /* file_size = 0 */
 
-        /* Entry 1: ".." -> parent = root (first_cluster = 0) */
-        for (j = 0; j < 32; j++)
-            sec_buf[32 + j] = 0;
-        for (j = 0; j < 8; j++) sec_buf[32 + j] = ' ';
-        sec_buf[32] = '.';                       /* first byte */
-        sec_buf[33] = '.';                       /* second byte */
-        for (j = 0; j < 3; j++) sec_buf[32 + 8 + j] = ' ';
+        /* Entry 1: ".." -> parent directory (cluster 0 = root) */
+        for (j = 0; j < 11; j++) sec_buf[32 + j] = ' ';
+        sec_buf[32] = '.';
+        sec_buf[33] = '.';
         sec_buf[32 + 11] = FAT16_ATTR_DIRECTORY;
-        /* first_cluster = 0 (already zeroed) */
+        sec_buf[32 + 26] = (uint8_t)(parent_cluster & 0xFF);
+        sec_buf[32 + 27] = (uint8_t)(parent_cluster >> 8);
 
-        /* Write cluster sector back */
         if (disk_write_sectors(fs->drive, cluster_lba, 1, KERNEL_SEGMENT,
                                (uint16_t)sec_buf) != 0)
             return ERR_DISK_ERROR;
     }
 
-    /* Fill in the root directory entry */
+    /* Find a free slot in the parent AFTER writing the dot entries, so
+     * sec_buf holds the parent directory sector when we fill the entry
+     * (filling it earlier corrupted that sector with dot-entry data). */
+    ret = fat16_dir_free_slot(fs, parent_cluster, &free_sector_lba,
+                              &free_entry_offset);
+    if (ret != 0) {
+        fat16_write_fat(fs, cluster, FAT16_FREE);
+        return ret;
+    }
+
+    /* Fill in the parent directory entry */
     {
         uint8_t j;
 
@@ -940,41 +996,53 @@ uint16_t fat16_mkdir(fat16_fs_t *fs, const uint8_t *name)
                            (uint16_t)sec_buf) != 0)
         return ERR_DISK_ERROR;
 
-    /* Mark cluster as end-of-chain in FAT */
-    if (fat16_write_fat(fs, cluster, FAT16_EOF_MIN) != 0)
-        return ERR_DISK_ERROR;
-
     return 0;
 }
 
-/* ─── Remove a directory ─── */
-uint16_t fat16_rmdir(fat16_fs_t *fs, const uint8_t *name)
+/* ─── Create a directory in root directory ─── */
+uint16_t fat16_mkdir(fat16_fs_t *fs, const uint8_t *name)
+{
+    return fat16_mkdir_in_dir(fs, 0, name);
+}
+
+/* ─── Remove an empty directory from a directory (0 = root) ─── */
+uint16_t fat16_rmdir_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                            const uint8_t *name)
 {
     fat16_dirent_t dirent;
     uint32_t sector_lba;
     uint16_t entry_offset;
 
-    if (fat16_find(fs, name, &dirent, &sector_lba, &entry_offset) != 0)
+    if (fat16_find_in_dir(fs, dir_cluster, name, &dirent,
+                          &sector_lba, &entry_offset) != 0)
         return ERR_NOT_FOUND;
 
     /* Must be a directory */
     if (!(dirent.attrs & FAT16_ATTR_DIRECTORY))
         return ERR_ACCESS_DENIED;
 
-    /* Check that directory is empty (only "." and ".." entries) */
-    if (dirent.first_cluster >= 2) {
-        uint32_t cluster_lba = fs->data_lba + (uint32_t)(dirent.first_cluster - 2);
-        uint16_t i;
+    /* Check that the whole cluster chain holds only "." / ".." entries */
+    {
+        uint16_t cluster = dirent.first_cluster;
 
-        if (disk_read_sectors(fs->drive, cluster_lba, 1, KERNEL_SEGMENT,
-                              (uint16_t)sec_buf) != 0)
-            return ERR_DISK_ERROR;
+        while (cluster >= 2 && cluster < FAT16_EOF_MIN) {
+            uint32_t cluster_lba = fs->data_lba + (uint32_t)(cluster - 2);
+            uint16_t i;
 
-        /* Scan all 16 entries; skip "." (idx 0) and ".." (idx 1) */
-        for (i = 2; i < 16; i++) {
-            fat16_dirent_t *de = (fat16_dirent_t *)(sec_buf + i * 32);
-            if (de->name[0] != 0x00 && de->name[0] != 0xE5)
+            if (disk_read_sectors(fs->drive, cluster_lba, 1, KERNEL_SEGMENT,
+                                  (uint16_t)sec_buf) != 0)
+                return ERR_DISK_ERROR;
+
+            for (i = 0; i < 16; i++) {
+                fat16_dirent_t *de = (fat16_dirent_t *)(sec_buf + i * 32);
+                if (de->name[0] == 0x00 || de->name[0] == 0xE5)
+                    continue;
+                if (de->name[0] == '.')
+                    continue;
                 return ERR_ACCESS_DENIED;  /* directory not empty */
+            }
+
+            cluster = fat16_read_fat(fs, cluster);
         }
     }
 
@@ -982,7 +1050,7 @@ uint16_t fat16_rmdir(fat16_fs_t *fs, const uint8_t *name)
     if (dirent.first_cluster >= 2)
         fat16_free_chain(fs, dirent.first_cluster);
 
-    /* Mark root directory entry as deleted */
+    /* Mark parent directory entry as deleted */
     if (disk_read_sectors(fs->drive, sector_lba, 1, KERNEL_SEGMENT,
                           (uint16_t)sec_buf) != 0)
         return ERR_DISK_ERROR;
@@ -996,22 +1064,30 @@ uint16_t fat16_rmdir(fat16_fs_t *fs, const uint8_t *name)
     return 0;
 }
 
-/* ─── Rename a file/directory ─── */
-uint16_t fat16_rename(fat16_fs_t *fs, const uint8_t *old_name,
-                       const uint8_t *new_name)
+/* ─── Remove a directory from root directory ─── */
+uint16_t fat16_rmdir(fat16_fs_t *fs, const uint8_t *name)
+{
+    return fat16_rmdir_in_dir(fs, 0, name);
+}
+
+/* ─── Rename a file/directory within a directory (0 = root) ─── */
+uint16_t fat16_rename_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                             const uint8_t *old_name,
+                             const uint8_t *new_name)
 {
     fat16_dirent_t dirent;
     uint32_t sector_lba;
     uint16_t entry_offset;
     uint8_t j;
 
-    if (fat16_find(fs, old_name, &dirent, &sector_lba, &entry_offset) != 0)
+    if (fat16_find_in_dir(fs, dir_cluster, old_name, &dirent,
+                          &sector_lba, &entry_offset) != 0)
         return ERR_NOT_FOUND;
 
     /* Check that new name doesn't already exist */
     {
         fat16_dirent_t tmp;
-        if (fat16_find(fs, new_name, &tmp, NULL, NULL) == 0)
+        if (fat16_find_in_dir(fs, dir_cluster, new_name, &tmp, NULL, NULL) == 0)
             return ERR_FILE_EXISTS;
     }
 
@@ -1029,4 +1105,11 @@ uint16_t fat16_rename(fat16_fs_t *fs, const uint8_t *old_name,
     /* Write back */
     return disk_write_sectors(fs->drive, sector_lba, 1, KERNEL_SEGMENT,
                               (uint16_t)sec_buf);
+}
+
+/* ─── Rename a file/directory in root directory ─── */
+uint16_t fat16_rename(fat16_fs_t *fs, const uint8_t *old_name,
+                       const uint8_t *new_name)
+{
+    return fat16_rename_in_dir(fs, 0, old_name, new_name);
 }

@@ -406,3 +406,25 @@
   every app's data (root FAT chains were never freed). Removed the now-unused
   delete_file_from_root(). Verified with mtools (BIN/ holds all 7 apps,
   root only KERNEL/SHELL) and `make test` (2/2 pass). Updated [[user-apps]].
+
+- 2026-07-11: Fix 9 NCD bugs — Tab key (keyboard.c scancode 0x0F→\\t),
+  scroll-clamp underflow in panel_refresh() (panel.c), m_itoa/m_u32toa
+  garbage bytes (str.c), FAT16 zero timestamps (build.py, fs.c), viewer
+  scroll support (viewer.c), F3 on folders (main.c), Enter on .BAT/.COM +
+  shell prompt on typing (main.c, str.c, str.h).
+
+- 2026-07-12: Fix 12 NCD round-2 bugs, mostly kernel-side. Kernel: multi-level
+  path resolution (`vfs_abspath`/`vfs_name_to_83`/`vfs_resolve_dir` in vfs.c,
+  `resolve_user_path` in syscalls.c) + FAT16 `*_in_dir` variants so
+  OPEN/CREATE/DELETE/MKDIR/RMDIR/STAT/RENAME honor subdirectories (fixed the
+  `/TMP/DEM.BAT` corruption from the old `name_to_83`); SYSCALL_EXEC searches
+  CWD then root then /BIN; READ/WRITE bounce buffers 32→512 B (copy no longer
+  freezes); PROC_PARAS 16→24 KB + zero child slot before load (fixed EDIT
+  hanging on multi-line files — its near BSS overran the slot into its own far
+  gap buffer). SHELL.COM one-shot mode (runs PSP command tail then exits).
+  NCD: panels sync CWD before every op, new |NAME|SIZE|DATE|TIME| column
+  layout, F-key bar on row 24 (inverted), cursor bar only in active pane, F5
+  copy confirmation, Shift-F4 new-file, F3 enters folders, command line +
+  Enter launch .COM/.BAT with screen clear. Added os-docs/NCD.md → DOCS/NCD.TXT.
+  Verified all 12 in QEMU (VGA dumps + serial); `make test` 2/2.
+  Updated [[ncd]], [[vfs-layer]], [[com-executor]], [[on-image-docs]].

@@ -49,16 +49,39 @@ void __far _main(void)
     uint16_t rh;         /* stdout redirect handle; NO_HANDLE = none */
     uint16_t bat_h;      /* batch file handle; NO_HANDLE = not running */
     uint16_t bat_echo;   /* 1 = echo batch lines, 0 = silent */
-
-    putstr("Harvac Shell v0.4\r\n");
+    uint16_t oneshot;    /* 1 = running the PSP command tail; exit after */
+    uint16_t have_line;  /* 1 = line[] already holds the next command */
 
     bat_h    = NO_HANDLE;
     bat_echo = 1;
 
+    /* Command tail from PSP 0x0082 (written by SYSCALL_EXEC):
+     * "SHELL.COM <cmd>" runs <cmd> once (including a full .BAT) and exits. */
+    {
+        const char *tail = (const char *)0x0082;
+        while (*tail == ' ') tail++;
+        oneshot = (*tail != '\0') ? 1 : 0;
+        if (oneshot) {
+            uint16_t n = 0;
+            while (tail[n] != '\0' && n < LINE_MAX - 1) {
+                line[n] = tail[n];
+                n++;
+            }
+            line[n] = '\0';
+        }
+    }
+    have_line = oneshot;
+
+    if (!oneshot)
+        putstr("Harvac Shell v0.4\r\n");
+
     for (;;) {
         rh = NO_HANDLE;
 
-        /* --- Determine line source: batch or interactive --- */
+        /* --- Determine line source: pre-seeded, batch, or interactive --- */
+        if (have_line) {
+            have_line = 0;   /* line[] holds the PSP command tail */
+        } else {
         if (bat_h != NO_HANDLE) {
             if (read_bat_line(bat_h, line, LINE_MAX) == 0) {
                 /* EOF: close batch, fall through to interactive */
@@ -67,6 +90,9 @@ void __far _main(void)
             }
         }
         if (bat_h == NO_HANDLE) {
+            /* One-shot command (and any batch it started) finished */
+            if (oneshot)
+                break;
             /* Interactive mode: print prompt, read line */
             syscall_int40(SYSCALL_GETCWD, 0, 0, (uint16_t)cwd, 64, 0, 0);
             putstr("\r\n");
@@ -90,6 +116,7 @@ void __far _main(void)
                 putstr("\r\n");
             }
         }
+        }   /* end line-source selection (have_line) */
 
         /* Skip leading spaces */
         for (i = 0; line[i] == ' '; i++)

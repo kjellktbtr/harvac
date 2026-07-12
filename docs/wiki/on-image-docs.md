@@ -5,13 +5,15 @@ sources:
   - build.py
   - os-docs/MANUAL.md
   - os-docs/EDIT.md
+  - os-docs/NCD.md
   - os-docs/XFER.md
 related:
   - "[[user-apps]]"
   - "[[shell]]"
   - "[[fat16-driver]]"
+  - "[[ncd]]"
 created: 2026-07-11
-updated: 2026-07-11
+updated: 2026-07-12
 confidence: high
 ---
 
@@ -38,6 +40,7 @@ During image population (after the `BIN/` apps are placed):
 |--------|----------|
 | `os-docs/MANUAL.md` | `DOCS/MANUAL.TXT` |
 | `os-docs/EDIT.md` | `DOCS/EDIT.TXT` |
+| `os-docs/NCD.md` | `DOCS/NCD.TXT` |
 | `os-docs/XFER.md` | `DOCS/XFER.TXT` |
 
 `README.TXT` in the root points users at `DOCS/MANUAL.TXT`.

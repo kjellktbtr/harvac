@@ -19,9 +19,11 @@
 
 /* Forward declarations */
 static void full_render(void);
-static void shell_prompt(void);
+static void launch_child(const char *cmd, const char *args, int pause);
+static void shell_prompt(const char *prefill);
 static void handle_f3(void);
 static void handle_f4(void);
+static void handle_shift_f4(void);
 static void handle_f5(void);
 static void handle_f6(void);
 static void handle_f7(void);
@@ -57,9 +59,15 @@ void __far _main(void)
             ncd_exit();
         }
 
-        /* F3: View, F4: Edit, F5-F8: File ops */
+        /* F3: View, F4: Edit (Shift-F4: new file), F5-F8: File ops */
         if (k == K_F3) { handle_f3(); continue; }
-        if (k == K_F4) { handle_f4(); continue; }
+        if (k == K_F4) {
+            if (kbd_shift & SH_SHIFT)
+                handle_shift_f4();
+            else
+                handle_f4();
+            continue;
+        }
         if (k == K_F5) { handle_f5(); continue; }
         if (k == K_F6) { handle_f6(); continue; }
         if (k == K_F7) { handle_f7(); continue; }
@@ -103,7 +111,17 @@ void __far _main(void)
                 break;
             case K_ENTER:
                 if (!panel_enter_dir(p)) {
-                    /* Not a directory - could open file viewer here */
+                    /* Not a directory - try launching .BAT or .COM */
+                    panel_entry_t e;
+                    panel_entry_get(p, p->sel, &e);
+                    if (p->sel < p->count) {
+                        if (m_ends_with(e.name, ".bat")) {
+                            /* Run the batch via SHELL.COM one-shot mode */
+                            launch_child("SHELL.COM", e.name, 1);
+                        } else if (m_ends_with(e.name, ".com")) {
+                            launch_child(e.name, "", 1);
+                        }
+                    }
                 }
                 break;
             case K_BS:
@@ -126,7 +144,13 @@ void __far _main(void)
                 }
                 break;
             default:
-                /* Ignore other keys */
+                /* Printable character: open shell prompt */
+                if (k >= 32 && k < 127) {
+                    char pb[2];
+                    pb[0] = (char)k;
+                    pb[1] = '\0';
+                    shell_prompt(pb);
+                }
                 break;
             }
         }
@@ -135,30 +159,68 @@ void __far _main(void)
 
 /* --- Full screen render --- */
 
+static void render_cmdline(void)
+{
+    panel_t *p = active_panel == PANEL_LEFT ? &panel_left : &panel_right;
+    vid_fill(ROW_SHELL, 0, COLS, ' ', A_SHELL);
+    vid_puts(ROW_SHELL, 0, p->cwd, A_SHELL);
+    vid_puts(ROW_SHELL, (u16)strlen(p->cwd), ">", A_SHELL);
+}
+
 static void full_render(void)
 {
-    render_menu_bar();
     render_pane_borders();
     panel_render(&panel_left, PANEL_LEFT);
     panel_render(&panel_right, PANEL_RIGHT);
-    render_separator();
     render_status_line();
-    render_help_line();
+    vid_fill(ROW_MSG, 0, COLS, ' ', A_NORMAL);
+    render_cmdline();
+    render_fkey_bar();
     vid_cursor_hide();
     vid_flush();
 }
 
+/* --- Child program launcher --- */
+
+/* Clear the screen, run the child, optionally wait for a key so its
+ * output can be read, then restore the browser view. */
+static void launch_child(const char *cmd, const char *args, int pause)
+{
+    static const char pak_msg[] = "\r\n[Press any key]";
+
+    syscall_int40(SYSCALL_CLEAR_SCREEN, 0, 0, 0, 0, 0, 0);
+    ncd_exec(cmd, args);
+    if (pause) {
+        /* Write directly to VGA: the child owned the screen */
+        syscall_int40(SYSCALL_WRITE_VGA, 0, 0, 0, 0, (u16)pak_msg, 0);
+        kbd_get();
+    }
+    panel_refresh(&panel_left);
+    panel_refresh(&panel_right);
+    full_render();
+}
+
 /* --- Shell prompt --- */
 
-static void shell_prompt(void)
+static void shell_prompt(const char *prefill)
 {
     char cmd[SHELL_BUF_SIZE];
     char cwd[PATH_MAX];
     u16  cmd_len = 0;
     unsigned k;
 
-    /* Get current CWD */
+    /* Commands run in the active panel's directory */
+    panel_sync_cwd(active_panel == PANEL_LEFT ? &panel_left : &panel_right);
     ncd_getcwd(cwd, sizeof(cwd));
+
+    /* Pre-fill from prefill if provided */
+    cmd[0] = '\0';
+    cmd_len = 0;
+    if (prefill) {
+        while (*prefill && cmd_len < SHELL_BUF_SIZE - 1)
+            cmd[cmd_len++] = *prefill++;
+        cmd[cmd_len] = '\0';
+    }
 
     /* Render shell prompt */
     vid_fill(ROW_SHELL, 0, COLS, ' ', A_SHELL);
@@ -170,7 +232,6 @@ static void shell_prompt(void)
     vid_flush();
 
     /* Read command */
-    cmd_len = 0;
     for (;;) {
         k = kbd_get();
         switch (k) {
@@ -180,21 +241,12 @@ static void shell_prompt(void)
             return;
         case K_ENTER:
             cmd[cmd_len] = '\0';
-            /* Execute command if non-empty */
+            /* Execute command if non-empty (SHELL.COM one-shot mode) */
             if (cmd_len > 0) {
-                /* Show executing message */
-                vid_fill(ROW_STATUS, 0, COLS, ' ', A_STATUS);
-                vid_puts(ROW_STATUS, 1, "Executing...", A_STATUS);
-                vid_flush();
-
-                /* Execute via SYSCALL_EXEC */
-                ncd_exec("SHELL.COM", cmd);
-
-                /* Refresh both panels after command */
-                panel_refresh(&panel_left);
-                panel_refresh(&panel_right);
+                launch_child("SHELL.COM", cmd, 1);
+            } else {
+                full_render();
             }
-            full_render();
             return;
         case K_BS:
             if (cmd_len > 0) {
@@ -234,13 +286,21 @@ static void handle_f3(void)
 {
     panel_t *p = active_panel == PANEL_LEFT ? &panel_left : &panel_right;
     panel_entry_t e;
+    panel_sync_cwd(p);
     panel_entry_get(p, p->sel, &e);
-    if (p->sel < p->count && !e.is_dir) {
-        viewer_open(e.name);
-        /* Refresh after viewer closes */
-        panel_refresh(&panel_left);
-        panel_refresh(&panel_right);
-        full_render();
+    if (p->sel < p->count) {
+        if (e.is_dir) {
+            panel_enter_dir(p);
+            panel_refresh(&panel_left);
+            panel_refresh(&panel_right);
+            full_render();
+        } else {
+            viewer_open(e.name);
+            /* Refresh after viewer closes */
+            panel_refresh(&panel_left);
+            panel_refresh(&panel_right);
+            full_render();
+        }
     }
 }
 
@@ -248,15 +308,37 @@ static void handle_f4(void)
 {
     panel_t *p = active_panel == PANEL_LEFT ? &panel_left : &panel_right;
     panel_entry_t e;
+    panel_sync_cwd(p);
     panel_entry_get(p, p->sel, &e);
     if (p->sel < p->count && !e.is_dir) {
-        /* Launch EDIT.COM with the selected file */
-        ncd_exec("EDIT.COM", e.name);
-        /* Refresh after editor returns */
-        panel_refresh(&panel_left);
-        panel_refresh(&panel_right);
-        full_render();
+        /* Launch EDIT.COM with the selected file (no pause: fullscreen) */
+        launch_child("EDIT.COM", e.name, 0);
     }
+}
+
+/* Shift-F4: ask for a name, create the empty file in the active
+ * directory, then open it in EDIT. */
+static void handle_shift_f4(void)
+{
+    panel_t *p = active_panel == PANEL_LEFT ? &panel_left : &panel_right;
+    char name[NAME_MAX];
+    u16 h;
+
+    name[0] = '\0';
+    if (dlg_input("New file:", name, NAME_MAX - 1) != DR_OK
+        || name[0] == '\0') {
+        full_render();
+        return;
+    }
+
+    panel_sync_cwd(p);
+
+    /* Create the file if it doesn't exist yet */
+    h = ncd_create(name);
+    if (h < 16)
+        ncd_close(h);
+
+    launch_child("EDIT.COM", name, 0);
 }
 
 static void handle_f5(void)
@@ -264,29 +346,48 @@ static void handle_f5(void)
     panel_t *src_p = active_panel == PANEL_LEFT ? &panel_left : &panel_right;
     panel_t *dst_p = active_panel == PANEL_LEFT ? &panel_right : &panel_left;
     char dst_path[PATH_MAX];
-    char cwd_save[PATH_MAX];
-    char msg[40];
+    char msg[96];
     u16 i;
     u16 copied = 0;
-    u16 has_selected = 0;
+    u16 sel_count;
 
-    /* Save CWD */
-    ncd_getcwd(cwd_save, sizeof(cwd_save));
+    if (src_p->count == 0)
+        return;
 
-    /* Change to source directory */
-    ncd_chdir(src_p->cwd);
-
-    /* Copy selected files, or current file if none selected */
-    for (i = 0; i < src_p->count; i++) {
-        panel_entry_t e_tmp;
-        panel_entry_get(src_p, i, &e_tmp);
-        if (e_tmp.selected) {
-            has_selected = 1;
-            break;
-        }
+    /* Copying onto itself would free the source's clusters mid-read */
+    if (m_strcmp(src_p->cwd, dst_p->cwd) == 0) {
+        dlg_msgbox("Panels show the same directory", DB_OK);
+        full_render();
+        return;
     }
 
-    if (has_selected) {
+    sel_count = panel_count_selected(src_p);
+
+    /* Confirmation: "Copy NAME to /TMP?" / "Copy N files to /TMP?" */
+    strcpy(msg, "Copy ");
+    if (sel_count > 0) {
+        char nbuf[8];
+        m_u32toa((u32)sel_count, nbuf);
+        strcat(msg, nbuf);
+        strcat(msg, " file(s)");
+    } else {
+        panel_entry_t e_tmp;
+        panel_entry_get(src_p, src_p->sel, &e_tmp);
+        strcat(msg, e_tmp.name);
+    }
+    strcat(msg, " to ");
+    strcat(msg, dst_p->cwd);
+    strcat(msg, "?");
+    if (dlg_msgbox(msg, DB_JNA) != DR_YES) {
+        full_render();
+        return;
+    }
+
+    /* Change to source directory */
+    panel_sync_cwd(src_p);
+
+    /* Copy selected files, or the current file if none selected */
+    if (sel_count > 0) {
         for (i = 0; i < src_p->count; i++) {
             panel_entry_t e_tmp;
             panel_entry_get(src_p, i, &e_tmp);
@@ -297,7 +398,7 @@ static void handle_f5(void)
             ncd_copy_recursive(e_tmp.name, dst_path);
             copied++;
         }
-    } else if (src_p->sel < src_p->count) {
+    } else {
         panel_entry_t e_tmp;
         panel_entry_get(src_p, src_p->sel, &e_tmp);
         strcpy(dst_path, dst_p->cwd);
@@ -307,23 +408,18 @@ static void handle_f5(void)
         copied = 1;
     }
 
-    /* Restore CWD */
-    ncd_chdir(cwd_save);
-
-    /* Show result */
-    if (copied > 0) {
-        msg[0] = '\0';
-        m_u32toa((u32)copied, msg + 1);
-        strcat(msg, " copied");
-        vid_fill(ROW_STATUS, 0, COLS, ' ', A_STATUS);
-        vid_puts(ROW_STATUS, 1, msg, A_STATUS);
-        vid_flush();
-    }
-
-    /* Refresh both panels */
+    /* Refresh both panels (each re-syncs its own CWD) */
     panel_refresh(&panel_left);
     panel_refresh(&panel_right);
     full_render();
+
+    /* Show result on the message row */
+    if (copied > 0) {
+        m_u32toa((u32)copied, msg);
+        strcat(msg, " copied");
+        vid_puts(ROW_MSG, 1, msg, A_STATUS);
+        vid_flush();
+    }
 }
 
 static void handle_f6(void)
@@ -331,7 +427,6 @@ static void handle_f6(void)
     panel_t *p = active_panel == PANEL_LEFT ? &panel_left : &panel_right;
     char new_name[NAME_MAX];
     char old_cwd[PATH_MAX];
-    char dst_path[PATH_MAX];
     panel_entry_t e;
 
     if (p->sel >= p->count) return;

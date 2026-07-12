@@ -561,12 +561,22 @@ def create_fat16_partition(image: Path, vbr_bin: Path) -> int:
     return FIRST_DATA_SECTOR
 
 
+def _fat16_datetime(mtime: float) -> tuple[int, int]:
+    """Convert Unix mtime to FAT16 date/time words."""
+    from datetime import datetime
+    dt = datetime.fromtimestamp(mtime)
+    fat_date = ((dt.year - 1980) << 9) | (dt.month << 5) | dt.day
+    fat_time = (dt.hour << 11) | (dt.minute << 5) | (dt.second // 2)
+    return fat_date, fat_time
+
+
 def write_file_to_fat16(
     image: Path,
     data: bytes,
     filename: str,
     first_data_sector: int,
     sectors_per_cluster: int = 1,
+    mtime: float | None = None,
 ) -> bool:
     """Write a file to the FAT16 root directory and allocate clusters."""
     SECTOR_SIZE = 512
@@ -580,6 +590,15 @@ def write_file_to_fat16(
     root_lba = PARTITION_START + RESERVED + FAT_COUNT * FAT_SECTORS
     first_data_lba = first_data_sector
     _ = sectors_per_cluster  # unused in current implementation
+
+    # Compute FAT16 date/time from mtime, or use current time
+    if mtime is not None:
+        fat_date, fat_time = _fat16_datetime(mtime)
+    else:
+        from datetime import datetime
+        now = datetime.now()
+        fat_date = ((now.year - 1980) << 9) | (now.month << 5) | now.day
+        fat_time = (now.hour << 11) | (now.minute << 5) | (now.second // 2)
 
     # Calculate number of clusters needed
     cluster_size = sectors_per_cluster * SECTOR_SIZE
@@ -668,7 +687,9 @@ def write_file_to_fat16(
         entry[0:8] = dir_name
         entry[8:11] = dir_ext
         entry[11] = 0x20  # Archive attribute
-        # Time: use zero
+        # FAT16 date/time
+        entry[22:24] = struct.pack('<H', fat_time)
+        entry[24:26] = struct.pack('<H', fat_date)
         entry[26:28] = struct.pack('<H', free_clusters[0])  # First cluster
         entry[28:32] = struct.pack('<I', len(data))  # File size
 
@@ -870,6 +891,13 @@ def write_file_to_subdir(image: Path, data: bytes, filename: str,
                 entry[0:8] = fname.encode("ascii")
                 entry[8:11] = fext.encode("ascii")
                 entry[11] = 0x20  # Archive
+                # FAT16 date/time: use current time for subdir entries
+                from datetime import datetime
+                _now = datetime.now()
+                _fat_date = ((_now.year - 1980) << 9) | (_now.month << 5) | _now.day
+                _fat_time = (_now.hour << 11) | (_now.minute << 5) | (_now.second // 2)
+                entry[22:24] = struct.pack('<H', _fat_time)
+                entry[24:26] = struct.pack('<H', _fat_date)
                 entry[26] = clusters[0] & 0xFF
                 entry[27] = (clusters[0] >> 8) & 0xFF
                 entry[28:32] = struct.pack('<I', len(data))
@@ -1158,6 +1186,7 @@ def main() -> int:
     if docs_cluster:
         for md_name, txt_name in (("MANUAL.md", "MANUAL.TXT"),
                                   ("EDIT.md", "EDIT.TXT"),
+                                  ("NCD.md", "NCD.TXT"),
                                   ("XFER.md", "XFER.TXT")):
             md_path = PROJECT_ROOT / "os-docs" / md_name
             if not md_path.exists():
@@ -1184,7 +1213,7 @@ def main() -> int:
     readme_data += b"OpenWatcom C kernel with FAT16 filesystem\r\n"
     readme_data += b"\r\n"
     readme_data += b"Apps in BIN/: HELLO, CAT, LS, UNAME, EDIT, NCD, XFER\r\n"
-    readme_data += b"Manual: cd DOCS  then  cat MANUAL.TXT\r\n"
+    readme_data += b"Manual: cd DOCS  then  cat MANUAL.TXT (also NCD.TXT)\r\n"
     if write_file_to_fat16(image, readme_data, "README.TXT", first_data):
         log("README.TXT written to disk image")
 
