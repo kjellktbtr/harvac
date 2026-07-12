@@ -42,6 +42,8 @@ Master catalog of all wiki pages for the Harvac project (HarvaOS ported to C).
 | [[xfer]] | Phase 10 | Complete - XFER.COM serial file-transfer agent (COBS+CRC-16/32, protocol v1) |
 | [[on-image-docs]] | Release | Complete - os-docs/ embedded on the image as DOCS/*.TXT |
 | [[ncd]] | Phase 11 | Complete — NCD.COM dual-pane file manager with far-segment memory model |
+| [[posix-api]] | Phase 12 | Complete — POSIX-like libc (open/read/write/lseek/dirent/stat/stdio) in lib/posix/ |
+| [[harva-dev-kit]] | Phase 12 | Complete — HDK TUI library (video/keyboard/dialog/far/fmt) in lib/hdk/ |
 
 ## Key Source Files
 
@@ -58,3 +60,6 @@ Master catalog of all wiki pages for the Harvac project (HarvaOS ported to C).
 | `tools/serial-xfer/` | Host-side transfer/mount tools (git submodule) |
 | `ld/kernel.lbc` | Kernel linker script |
 | `apps/xfer.asm` | XFER serial file-transfer agent (NASM flat .COM) |
+| `lib/posix/` | POSIX-like libc sources (open/read/write/dirent/stat/stdio/stdlib/errno) |
+| `lib/hdk/` | HDK TUI library sources (vid/kbd/dlg/far/fmt) |
+| `lib/include/` | Shared headers for both libraries |

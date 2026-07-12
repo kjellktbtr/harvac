@@ -12,7 +12,6 @@ typedef signed long    int32_t;
 
 /* Useful for far pointer construction */
 typedef uint16_t seg_t;
-typedef uint16_t off_t;
 
 /* Boolean */
 #define TRUE  1

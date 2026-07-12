@@ -1,5 +1,7 @@
 # Operation Log
 
+2026-07-12 — **Phase 12 complete:** Extracted shared POSIX-like libc (lib/posix/) and Harva Development Kit (lib/hdk/). Deleted duplicate vid/kbd/far/str/dlg sources from medit and ncd. Kernel extended with WRITE_STDERR, serial device fd, lseek whence, TELL, GET_PID. All apps (hello, cat, ls, uname, shell, EDIT, NCD) build cleanly; 2/2 smoke tests pass.
+
 2025-07-05 — Bootstrapped wiki structure (CLAUDE.md, index.md, log.md)
 2025-07-05 — Created initial wiki pages: toolchain.md, architecture.md
 2025-07-05 — **Phase 0 complete:** Toolchain verified (wcc/wasm/wlink/nasm). Kernel compiles,

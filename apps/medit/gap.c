@@ -6,7 +6,6 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
-#include "far.h"
 #include "gap.h"
 
 static u8 __far *buf;

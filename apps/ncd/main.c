@@ -9,12 +9,8 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
-#include "vid.h"
-#include "kbd.h"
 #include "fs.h"
 #include "panel.h"
-
-#include "dlg.h"
 #include "viewer.h"
 
 /* Forward declarations */
@@ -115,10 +111,10 @@ void __far _main(void)
                     panel_entry_t e;
                     panel_entry_get(p, p->sel, &e);
                     if (p->sel < p->count) {
-                        if (m_ends_with(e.name, ".bat")) {
+                        if (ends_with(e.name, ".bat")) {
                             /* Run the batch via SHELL.COM one-shot mode */
                             launch_child("SHELL.COM", e.name, 1);
-                        } else if (m_ends_with(e.name, ".com")) {
+                        } else if (ends_with(e.name, ".com")) {
                             launch_child(e.name, "", 1);
                         }
                     }
@@ -355,7 +351,7 @@ static void handle_f5(void)
         return;
 
     /* Copying onto itself would free the source's clusters mid-read */
-    if (m_strcmp(src_p->cwd, dst_p->cwd) == 0) {
+    if (strcmp(src_p->cwd, dst_p->cwd) == 0) {
         dlg_msgbox("Panels show the same directory", DB_OK);
         full_render();
         return;
@@ -367,7 +363,7 @@ static void handle_f5(void)
     strcpy(msg, "Copy ");
     if (sel_count > 0) {
         char nbuf[8];
-        m_u32toa((u32)sel_count, nbuf);
+        u32toa((u32)sel_count, nbuf);
         strcat(msg, nbuf);
         strcat(msg, " file(s)");
     } else {
@@ -415,7 +411,7 @@ static void handle_f5(void)
 
     /* Show result on the message row */
     if (copied > 0) {
-        m_u32toa((u32)copied, msg);
+        u32toa((u32)copied, msg);
         strcat(msg, " copied");
         vid_puts(ROW_MSG, 1, msg, A_STATUS);
         vid_flush();
@@ -440,7 +436,7 @@ static void handle_f6(void)
 
     /* Show rename dialog */
     if (dlg_input("Rename/Move:", new_name, NAME_MAX - 1) == DR_OK) {
-        if (m_strcmp(new_name, e.name) != 0) {
+        if (strcmp(new_name, e.name) != 0) {
             ncd_rename(e.name, new_name);
         }
     }

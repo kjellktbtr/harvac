@@ -6,8 +6,6 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
-#include "far.h"
-#include "vid.h"
 #include "fs.h"
 #include "panel.h"
 
@@ -51,7 +49,7 @@ static void panel_sort(panel_t *p)
             } else if (!a.is_dir && b.is_dir) {
                 swap = 1;
             } else {
-                if (m_strcmp(a.name, b.name) > 0)
+                if (strcmp(a.name, b.name) > 0)
                     swap = 1;
             }
 
@@ -399,7 +397,7 @@ void panel_render(panel_t *p, int pane_id)
         if (e.is_dir) {
             vid_puts(r, left_col + P_SIZE, "<DIR>", attr);
         } else {
-            m_format_size(e.size, tmp);
+            format_size(e.size, tmp);
             vid_puts(r, left_col + P_SIZE, tmp, attr);
         }
 
@@ -450,7 +448,7 @@ void render_status_line(void)
 
     /* Selection count */
     sel_count = panel_count_selected(&panel_left) + panel_count_selected(&panel_right);
-    m_u32toa((u32)sel_count, sc_buf);
+    u32toa((u32)sel_count, sc_buf);
     strcat(tmp, " Sel:");
     strcat(tmp, sc_buf);
 

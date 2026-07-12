@@ -8,7 +8,6 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
-#include "far.h"
 #include "gap.h"
 #include "doc.h"
 

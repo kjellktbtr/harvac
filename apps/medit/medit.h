@@ -1,12 +1,13 @@
-/* MEDIT - Norwegian text editor for PC DOS 3.3+ / IBM 5155 (256 kB)
- * Common types, key codes, cp865 character macros.
- * All sources are plain ASCII; Norwegian letters use cp865 escapes.
+/* MEDIT - Norwegian text editor for Harvac OS.
+ * Common types, layout constants, and shared library includes.
+ * Key codes, string helpers, and dialogs come from lib/include/.
  */
 #ifndef MEDIT_H
 #define MEDIT_H
 
+/* Local type aliases (compatible with types.h uint*_t) */
 typedef unsigned char  u8;
-typedef unsigned int   u16;   /* 16-bit on OpenWatcom 16-bit targets */
+typedef unsigned int   u16;
 typedef unsigned long  u32;
 
 /* cp865 (Nordic) codes for aa/ae/oe - same values as cp437 for these six */
@@ -17,9 +18,16 @@ typedef unsigned long  u32;
 #define S_oe "\x9B"   /* o-slash lower */
 #define S_OE "\x9D"   /* O-slash upper */
 
-/* Screen layout */
-#define ROWS        25
-#define COLS        80
+/* ─── Shared library headers ─── */
+#include "types.h"
+#include "string.h"
+#include "harva.h"
+#include "hdk_video.h"    /* ROWS, COLS, vid_* */
+#include "hdk_keys.h"     /* K_*, SH_*, kbd_get, kbd_shift */
+#include "hdk_box.h"      /* BOX_*, A_NORMAL, A_INVERSE, A_DLG, A_DLG_HI */
+#include "hdk_dialog.h"   /* dlg_msgbox, dlg_input, DB_*, DR_*, HDK_* */
+
+/* Screen layout — ROWS=25 / COLS=80 from hdk_video.h */
 #define TEXT_TOP    1          /* first text row (row 0 = menu bar)     */
 #define TEXT_ROWS   23         /* rows 1..23 text, row 24 = status line */
 #define STATUS_ROW  24
@@ -28,40 +36,6 @@ typedef unsigned long  u32;
 #define A_TEXT      0x07
 #define A_BAR       0x70       /* menu bar / status line: inverse */
 #define A_SEL       0x70       /* selection: inverse */
-
-/* Normalized key codes from kbd_get():
- * 0x0000-0x00FF = ASCII / cp865 byte; 0x01nn = special (nn = scan code) */
-#define K_SPECIAL   0x100
-#define K_UP        (K_SPECIAL|0x48)
-#define K_DOWN      (K_SPECIAL|0x50)
-#define K_LEFT      (K_SPECIAL|0x4B)
-#define K_RIGHT     (K_SPECIAL|0x4D)
-#define K_HOME      (K_SPECIAL|0x47)
-#define K_END       (K_SPECIAL|0x4F)
-#define K_PGUP      (K_SPECIAL|0x49)
-#define K_PGDN      (K_SPECIAL|0x51)
-#define K_INS       (K_SPECIAL|0x52)
-#define K_DEL       (K_SPECIAL|0x53)
-#define K_CHOME     (K_SPECIAL|0x77)
-#define K_CEND      (K_SPECIAL|0x75)
-#define K_CPGUP     (K_SPECIAL|0x84)
-#define K_CPGDN     (K_SPECIAL|0x76)
-#define K_CLEFT     (K_SPECIAL|0x73)
-#define K_CRIGHT    (K_SPECIAL|0x74)
-#define K_ALT_F     (K_SPECIAL|0x21)
-#define K_ALT_R     (K_SPECIAL|0x13)
-#define K_ALT_S     (K_SPECIAL|0x1F)
-#define K_F1        (K_SPECIAL|0x3B)
-#define K_F3        (K_SPECIAL|0x3D)
-#define K_ESC       (K_SPECIAL|0x01) /* kernel gives ESC as scancode, ASCII 0 */
-#define K_ENTER     0x0D
-#define K_BS        0x08
-#define K_TAB       0x09
-
-/* kbd_shift bits (valid after kbd_get) */
-#define SH_SHIFT    0x01
-#define SH_CTRL     0x02
-#define SH_ALT      0x04
 
 #define TABSTOP     8
 
@@ -79,14 +53,4 @@ typedef unsigned long  u32;
 #define MI_FINNNESTE 11
 #define MI_ERSTATT  12
 
-/* --- Harvac port: string function aliases via str.h --- */
-#include "str.h"
-#define strlen  m_strlen
-#define strcmp  m_strcmp
-#define strcpy  m_strcpy
-#define strcat  m_strcat
-#define memcpy  m_memcpy
-#define memmove m_memmove
-#define memset  m_memset
-
-#endif
+#endif /* MEDIT_H */

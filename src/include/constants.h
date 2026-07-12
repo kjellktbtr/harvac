@@ -30,6 +30,7 @@
 #define SYSCALL_DELETE          0x16
 #define SYSCALL_STAT            0x17
 #define SYSCALL_RENAME          0x18  /* SI = old name offset, DI = new name offset */
+#define SYSCALL_TELL            0x19  /* BX = handle, CX = ptr to 4-byte position buf */
 
 /* Directory (0x20-0x2F) */
 #define SYSCALL_OPENDIR         0x20

@@ -3,8 +3,6 @@
  * switch menus), Enter selects, Esc closes. Returns an MI_* id.
  */
 #include "medit.h"
-#include "vid.h"
-#include "kbd.h"
 #include "edit.h"
 #include "menu.h"
 

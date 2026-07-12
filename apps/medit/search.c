@@ -3,7 +3,6 @@
  * fine at 60 kB even on a 4.77 MHz 8088.
  */
 #include "medit.h"
-#include "vid.h"
 #include "gap.h"
 #include "edit.h"
 #include "menu.h"

@@ -7,9 +7,6 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
-#include "far.h"
-#include "vid.h"
-#include "kbd.h"
 #include "fs.h"
 #include "viewer.h"
 
@@ -100,11 +97,11 @@ static void viewer_render(void)
     vid_fill(ROWS - 1, 0, COLS, ' ', A_STATUS);
     vid_puts(ROWS - 1, 1, viewer_filename, A_STATUS);
     if (total_lines > 0) {
-        m_u32toa((u32)(viewer_scroll + 1), tmp);
+        u32toa((u32)(viewer_scroll + 1), tmp);
         vid_puts(ROWS - 1, 20, "Ln ", A_STATUS);
         vid_puts(ROWS - 1, 23, tmp, A_STATUS);
         vid_puts(ROWS - 1, 23 + (u16)strlen(tmp), "/", A_STATUS);
-        m_u32toa((u32)total_lines, tmp);
+        u32toa((u32)total_lines, tmp);
         vid_puts(ROWS - 1, 24 + (u16)strlen(tmp), tmp, A_STATUS);
     }
     vid_puts(ROWS - 1, 60, "F3/Esc:Close", A_STATUS);

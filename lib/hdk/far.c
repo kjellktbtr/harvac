@@ -1,5 +1,8 @@
+/* far.c -- Far-pointer memory operations for HarvaC HDK.
+ * Identical to apps/medit/far.c and apps/ncd/far.c (merged into one copy). */
+
 #include "types.h"
-#include "far.h"
+#include "harva.h"
 
 void far_copy(uint8_t __far *dst, const uint8_t __far *src, uint16_t n)
 {

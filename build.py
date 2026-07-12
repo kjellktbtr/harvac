@@ -41,6 +41,12 @@ QEMU = shutil.which("qemu-system-i386") or "qemu-system-i386"
 INCLUDE_DIR = SRC_DIR / "include"
 WATCOM_INC = WATCOM / "h"
 
+# Shared library directories (lib/)
+LIB_DIR = PROJECT_ROOT / "lib"
+LIB_POSIX_DIR = LIB_DIR / "posix"
+LIB_HDK_DIR = LIB_DIR / "hdk"
+LIB_INCLUDE_DIR = LIB_DIR / "include"
+
 # Source manifests
 C_SOURCES = [
     SRC_DIR / "kernel" / "kmain.c",
@@ -92,6 +98,7 @@ def compile_c(src: Path, out_dir: Path) -> bool:
             str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx",
             "-bt=dos",
             f"-i={INCLUDE_DIR}",
+            f"-i={LIB_INCLUDE_DIR}",
             f"-i={WATCOM_INC}",
             "-fo=" + str(obj),
             str(src),
@@ -195,9 +202,12 @@ def link_kernel(obj_dir: Path, out_dir: Path) -> bool:
         return False
 
 
-def link_app(obj_dir: Path, out_dir: Path, app_name: str) -> bool:
+def link_app(obj_dir: Path, out_dir: Path, app_name: str,
+             lib_objs: "list[Path] | None" = None) -> bool:
     """Compile and link a .COM application (C source or WASM assembly).
-    Tries .c first, falls back to .asm."""
+    Tries .c first, falls back to .asm.
+    lib_objs: optional list of pre-compiled library .obj files appended AFTER
+    the app's own object (entry-point ordering rule: app's _main must be first)."""
     c_src = APPS_DIR / f"{app_name}.c"
     asm_src = APPS_DIR / f"{app_name}.asm"
 
@@ -227,6 +237,10 @@ def link_app(obj_dir: Path, out_dir: Path, app_name: str) -> bool:
         f.write("option quiet\n")
         f.write(f"name {app_out}\n")
         f.write(f"file {obj}\n")
+        # lib objects AFTER app object (entry-point ordering)
+        for lobj in (lib_objs or []):
+            if lobj.exists():
+                f.write(f"file {lobj}\n")
 
     try:
         run([str(WLINK), f"@{temp_ld}"])
@@ -243,22 +257,24 @@ BIN_APPS = ("HELLO", "CAT", "LS", "UNAME", "EDIT", "NCD", "XFER")
 MEDIT_DIR = APPS_DIR / "medit"
 
 MEDIT_SOURCES = [
-    "main", "str", "far", "gap", "clip", "vid", "kbd",
-    "doc", "dlg", "edit", "menu", "search",
+    "main", "gap", "clip", "doc", "dlg", "edit", "menu", "search",
 ]
 
 
-def build_medit(obj_dir: Path, out_dir: Path) -> bool:
-    """Compile and link MEDIT text editor as EDIT.COM."""
+def build_medit(obj_dir: Path, out_dir: Path,
+                lib_objs: "list[Path] | None" = None) -> bool:
+    """Compile and link MEDIT text editor as EDIT.COM.
+    lib_objs appended after app objects (entry-point ordering)."""
     objs: list[Path] = []
     for name in MEDIT_SOURCES:
         src = MEDIT_DIR / f"{name}.c"
-        obj = obj_dir / f"{name}.obj"
+        obj = obj_dir / f"medit_{name}.obj"
         try:
             run([
                 str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx",
                 "-bt=dos",
                 f"-i={INCLUDE_DIR}",
+                f"-i={LIB_INCLUDE_DIR}",
                 f"-i={MEDIT_DIR}",
                 "-fo=" + str(obj),
                 str(src),
@@ -278,6 +294,9 @@ def build_medit(obj_dir: Path, out_dir: Path) -> bool:
         f.write(f"name {edit_out}\n")
         for obj in objs:
             f.write(f"file {obj}\n")
+        for lobj in (lib_objs or []):
+            if lobj.exists():
+                f.write(f"file {lobj}\n")
 
     try:
         run([str(WLINK), f"@{temp_ld}"])
@@ -291,21 +310,24 @@ def build_medit(obj_dir: Path, out_dir: Path) -> bool:
 NCD_DIR = APPS_DIR / "ncd"
 
 NCD_SOURCES = [
-    "main", "str", "vid", "kbd", "fs", "panel", "dlg", "viewer", "far",
+    "main", "fs", "panel", "viewer",
 ]
 
 
-def build_ncd(obj_dir: Path, out_dir: Path) -> bool:
-    """Compile and link NCD dual-pane file manager as NCD.COM."""
+def build_ncd(obj_dir: Path, out_dir: Path,
+              lib_objs: "list[Path] | None" = None) -> bool:
+    """Compile and link NCD dual-pane file manager as NCD.COM.
+    lib_objs appended after app objects (entry-point ordering)."""
     objs: list[Path] = []
     for name in NCD_SOURCES:
         src = NCD_DIR / f"{name}.c"
-        obj = obj_dir / f"{name}.obj"
+        obj = obj_dir / f"ncd_{name}.obj"
         try:
             run([
                 str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx",
                 "-bt=dos",
                 f"-i={INCLUDE_DIR}",
+                f"-i={LIB_INCLUDE_DIR}",
                 f"-i={NCD_DIR}",
                 "-fo=" + str(obj),
                 str(src),
@@ -325,6 +347,9 @@ def build_ncd(obj_dir: Path, out_dir: Path) -> bool:
         f.write(f"name {ncd_out}\n")
         for obj in objs:
             f.write(f"file {obj}\n")
+        for lobj in (lib_objs or []):
+            if lobj.exists():
+                f.write(f"file {lobj}\n")
 
     try:
         run([str(WLINK), f"@{temp_ld}"])
@@ -333,6 +358,36 @@ def build_ncd(obj_dir: Path, out_dir: Path) -> bool:
     except subprocess.CalledProcessError as e:
         log(f"NCD link failed: {e.stderr.strip()}", "ERROR")
         return False
+
+
+def build_libs(obj_dir: Path) -> list:
+    """Compile all lib/posix and lib/hdk C sources into obj_dir.
+    Returns list of Path objects for the resulting .obj files."""
+    objs: list[Path] = []
+    lib_sources = (
+        sorted(LIB_POSIX_DIR.glob("*.c")) +
+        sorted(LIB_HDK_DIR.glob("*.c"))
+    )
+    if not lib_sources:
+        return objs
+    for src in lib_sources:
+        obj = obj_dir / f"lib_{src.stem}.obj"
+        try:
+            run([
+                str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx",
+                "-bt=dos",
+                f"-i={INCLUDE_DIR}",
+                f"-i={LIB_INCLUDE_DIR}",
+                f"-i={WATCOM_INC}",
+                "-fo=" + str(obj),
+                str(src),
+            ])
+            log(f"Compiled lib {src.name} -> {obj.name}")
+        except subprocess.CalledProcessError as e:
+            log(f"Lib compile failed for {src.name}: {e.stderr.strip()}", "ERROR")
+            return []
+        objs.append(obj)
+    return objs
 
 
 def build_xfer(out_dir: Path) -> bool:
@@ -371,20 +426,23 @@ def build_all() -> bool:
     if not link_kernel(OBJ_DIR, BUILD_DIR):
         return False
 
-    # 3b. Build apps (.COM executables)
+    # 3b. Compile shared libraries (lib/posix, lib/hdk)
+    lib_objs = build_libs(OBJ_DIR)
+
+    # 3c. Build apps (.COM executables) — lib objects linked after app object
     for app in ("hello", "cat", "ls", "uname", "shell"):
-        if not link_app(OBJ_DIR, BUILD_DIR, app):
+        if not link_app(OBJ_DIR, BUILD_DIR, app, lib_objs):
             log(f"App build ({app}) skipped", "WARNING")
 
-    # 3c. Build MEDIT (multi-file editor)
-    if not build_medit(OBJ_DIR, BUILD_DIR):
+    # 3d. Build MEDIT (multi-file editor)
+    if not build_medit(OBJ_DIR, BUILD_DIR, lib_objs):
         log("MEDIT build skipped", "WARNING")
 
-    # 3d. Build NCD (dual-pane file manager)
-    if not build_ncd(OBJ_DIR, BUILD_DIR):
+    # 3e. Build NCD (dual-pane file manager)
+    if not build_ncd(OBJ_DIR, BUILD_DIR, lib_objs):
         log("NCD build skipped", "WARNING")
 
-    # 3e. Assemble XFER serial file-transfer agent
+    # 3f. Assemble XFER serial file-transfer agent
     if not build_xfer(BUILD_DIR):
         log("XFER build skipped", "WARNING")
 

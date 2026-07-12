@@ -16,8 +16,13 @@
 /* ─── Open file table ─── */
 #define MAX_OPEN_FILES  16
 
+/* open_file_entry_t.kind values */
+#define OF_KIND_FILE    0   /* regular FAT16 file */
+#define OF_KIND_SERIAL  1   /* /dev/com1, /dev/tty, CON device fd */
+
 typedef struct {
     uint16_t      used;   /* 0 = free */
+    uint8_t       kind;   /* OF_KIND_FILE or OF_KIND_SERIAL */
     fat16_file_t  file;
 } open_file_entry_t;
 
@@ -196,6 +201,44 @@ static uint16_t cwd_dir_cluster(uint16_t *cluster_out)
     return 1;
 }
 
+/* ─── Device path detection ─── */
+/* Returns 1 if the NUL-terminated path in caller_ds:path_off refers to a
+ * recognised device (serial/console), 0 otherwise. Used by SYSCALL_OPEN to
+ * create device fds without going through the FAT16 layer. */
+static int is_device_path(uint16_t caller_ds, uint16_t path_off)
+{
+    /* Read up to 12 characters to compare */
+    static char buf[16];
+    uint16_t i;
+    uint8_t c;
+    const char *devs[] = { "CON", "/dev/tty", "/dev/com1", "/dev/CON" };
+    uint16_t ndvs = 4;
+    uint16_t d;
+
+    for (i = 0; i < 15; i++) {
+        c = read_far_b(caller_ds, path_off + i);
+        buf[i] = (char)c;
+        if (c == 0) break;
+    }
+    buf[15] = '\0';
+
+    /* Case-insensitive compare against known device names */
+    for (d = 0; d < ndvs; d++) {
+        const char *dev = devs[d];
+        uint16_t j;
+        for (j = 0; buf[j] && dev[j]; j++) {
+            uint8_t a = (uint8_t)buf[j];
+            uint8_t b = (uint8_t)dev[j];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) break;
+        }
+        if (buf[j] == '\0' && dev[j] == '\0')
+            return 1;
+    }
+    return 0;
+}
+
 /* ─── Install INT 0x40 handler in the IVT at address 0x0000:0x0100 ─── */
 void syscall_init(void)
 {
@@ -245,6 +288,21 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
 
     case SYSCALL_WRITE_CHAR:
         out_byte(al);
+        break;
+
+    case SYSCALL_WRITE_STDERR:
+        /* SI = NUL-terminated string; always to serial+VGA, never redirected. */
+        if (si != 0) {
+            uint16_t off = si;
+            uint8_t c;
+            do {
+                c = read_far_b(caller_ds, off);
+                if (c == 0) break;
+                serial_putchar((char)c);
+                video_tty_putchar((char)c);
+                off++;
+            } while (1);
+        }
         break;
 
     case SYSCALL_SET_STDOUT:
@@ -345,18 +403,14 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
         {
             /* DS:BX = path (C string), AL = flags (O_RDONLY etc.).
              * Path may be relative (resolved against CWD) or absolute
-             * with subdirectories ("/DOCS/MANUAL.TXT"). */
+             * with subdirectories ("/DOCS/MANUAL.TXT").
+             * Device paths ("CON", "/dev/tty", "/dev/com1") create a
+             * serial/console device fd (OF_KIND_SERIAL). */
             /* Static: see SYSCALL_READ — same SS!=DS requirement. */
             static uint8_t name_83[12];
             static uint16_t dir_cluster;
             static fat16_fs_t *fs;
             uint16_t i;
-
-            if (resolve_user_path(caller_ds, bx, &fs, &dir_cluster,
-                                  name_83) != 0) {
-                ret = 0xFFFF;
-                break;
-            }
 
             /* Find a free slot in the open file table */
             for (i = 0; i < MAX_OPEN_FILES; i++) {
@@ -368,12 +422,27 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                 break;
             }
 
+            /* Check for device path first */
+            if (is_device_path(caller_ds, bx)) {
+                open_files[i].used = 1;
+                open_files[i].kind = OF_KIND_SERIAL;
+                ret = i;
+                break;
+            }
+
+            if (resolve_user_path(caller_ds, bx, &fs, &dir_cluster,
+                                  name_83) != 0) {
+                ret = 0xFFFF;
+                break;
+            }
+
             if (fat16_open_in_dir(fs, dir_cluster, name_83,
                                   &open_files[i].file) != 0) {
                 ret = 0xFFFF;
                 break;
             }
             open_files[i].used = 1;
+            open_files[i].kind = OF_KIND_FILE;
             ret = i;   /* return file handle */
         }
         break;
@@ -409,6 +478,15 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                 ret = ERR_INVALID_HANDLE;
                 break;
             }
+            /* Device fd: read from serial port (blocking, one char at a time) */
+            if (open_files[handle].kind == OF_KIND_SERIAL) {
+                for (i = 0; i < count; i++) {
+                    uint8_t cb = (uint8_t)serial_getchar();
+                    write_far_b(caller_ds, user_buf + i, cb);
+                }
+                ret = count;
+                break;
+            }
             while (count > 0) {
                 chunk = (count > sizeof(tmp)) ? sizeof(tmp) : count;
                 n = fat16_read(&open_files[handle].file, tmp, chunk);
@@ -438,6 +516,13 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
 
             if (handle >= MAX_OPEN_FILES || !open_files[handle].used) {
                 ret = ERR_INVALID_HANDLE;
+                break;
+            }
+            /* Device fd: write to serial port */
+            if (open_files[handle].kind == OF_KIND_SERIAL) {
+                for (i = 0; i < count; i++)
+                    serial_putchar((char)read_far_b(caller_ds, user_buf + i));
+                ret = count;
                 break;
             }
             while (count > 0) {
@@ -507,15 +592,59 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
 
     case SYSCALL_SEEK:
         {
+            /* AL = whence (SEEK_SET=0, SEEK_CUR=1, SEEK_END=2).
+             * BX = handle, CX = pos_low16, DX = pos_high16 (32-bit offset). */
             uint16_t handle = bx;
-            uint32_t pos = (uint32_t)dx << 16 | cx;
+            uint32_t offset = (uint32_t)dx << 16 | cx;
+            uint32_t pos;
 
             if (handle >= MAX_OPEN_FILES || !open_files[handle].used) {
                 ret = ERR_INVALID_HANDLE;
                 break;
             }
+            /* Device fds: seek unsupported */
+            if (open_files[handle].kind == OF_KIND_SERIAL) {
+                ret = ERR_INVALID_PARAM;
+                break;
+            }
+            switch (al) {
+            case 1:   /* SEEK_CUR */
+                pos = open_files[handle].file.position + offset;
+                break;
+            case 2:   /* SEEK_END */
+                pos = (offset <= open_files[handle].file.file_size)
+                      ? open_files[handle].file.file_size - offset
+                      : 0;
+                break;
+            default:  /* SEEK_SET (0) */
+                pos = offset;
+                break;
+            }
             if (fat16_seek(&open_files[handle].file, pos) != 0)
                 ret = ERR_INVALID_PARAM;
+        }
+        break;
+
+    case SYSCALL_TELL:
+        {
+            /* BX = handle, CX = ptr to 4-byte position buffer in caller DS */
+            uint16_t handle = bx;
+            uint16_t out_off = cx;
+            uint32_t position;
+
+            if (handle >= MAX_OPEN_FILES || !open_files[handle].used) {
+                ret = ERR_INVALID_HANDLE;
+                break;
+            }
+            if (open_files[handle].kind == OF_KIND_SERIAL) {
+                position = 0;
+            } else {
+                position = open_files[handle].file.position;
+            }
+            write_far_b(caller_ds, out_off + 0, (uint8_t)(position));
+            write_far_b(caller_ds, out_off + 1, (uint8_t)(position >> 8));
+            write_far_b(caller_ds, out_off + 2, (uint8_t)(position >> 16));
+            write_far_b(caller_ds, out_off + 3, (uint8_t)(position >> 24));
         }
         break;
 
@@ -999,6 +1128,15 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
         /* Return to parent (shell) via pctx, or restart shell if no parent. */
         return_to_parent();
         /* Unreachable */
+        break;
+
+    case SYSCALL_GET_PID:
+        /* Return a process id proxy: (next_seg - PROC_PARAS) is the current
+         * process's load segment. Not a true PID but unique per exec level. */
+        {
+            uint16_t ns = get_next_seg();
+            ret = (ns > PROC_PARAS) ? (uint16_t)(ns - PROC_PARAS) : ns;
+        }
         break;
 
     /* Memory (0x50-0x51) */

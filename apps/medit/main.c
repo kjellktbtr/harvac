@@ -6,8 +6,6 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
-#include "vid.h"
-#include "kbd.h"
 #include "gap.h"
 #include "doc.h"
 #include "edit.h"
@@ -69,7 +67,7 @@ void __far _main(void)
         }
     }
 
-    vid_init(0);
+    vid_init();
 
     for (;;) {
         edit_render();

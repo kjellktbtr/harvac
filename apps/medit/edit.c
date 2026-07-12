@@ -3,8 +3,6 @@
  * two anchors, e_top (top-of-screen line start) and e_cur.
  */
 #include "medit.h"
-#include "vid.h"
-#include "kbd.h"
 #include "gap.h"
 #include "doc.h"
 #include "clip.h"
