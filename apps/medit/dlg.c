@@ -4,14 +4,12 @@
 
 #include "medit.h"
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "dirent.h"
+#include "unistd.h"
+#include "fcntl.h"
 #include "dlg.h"
 
 /* ─── File browser internals ─── */
-
-/* Raw FAT16 directory handle (7 × u16 = 14 bytes, opaque to userspace) */
-typedef struct { u16 raw[7]; } fb_dir_t;
 
 #define FB_MAX   120
 #define FK_FILE  0
@@ -56,36 +54,24 @@ static void fb_sort(void)
 
 static void fb_read_dir(void)
 {
-    fb_dir_t     dir;
-    fat_dirent_t de;
-    char         cwd[64];
-    char         nm[13];
-    int          ret;
+    DIR          *dp;
+    struct dirent *de;
+    char          cwd[64];
 
     fb_n = 0;
 
-    syscall_int40(SYSCALL_GETCWD, 0, 0, (u16)cwd, (u16)sizeof(cwd), 0, 0);
+    getcwd(cwd, (u16)sizeof(cwd));
     if (cwd[0] != '/' || cwd[1] != '\0')
         fb_add("..", FK_DIR);
 
-    syscall_int40(SYSCALL_OPENDIR, 0, 0, (u16)&dir, 0, 0, 0);
-    for (;;) {
-        ret = (int)syscall_int40(SYSCALL_READDIR, 0, 0,
-                                 (u16)&dir, (u16)&de, 0, 0);
-        if (ret != 0)
-            break;
-        if (de.name[0] == 0 || de.name[0] == (u8)0xE5)
+    dp = opendir(".");
+    if (!dp) return;
+    while ((de = readdir(dp)) != (struct dirent *)0) {
+        if (de->d_name[0] == '.' && de->d_name[1] == '.' && de->d_name[2] == '\0')
             continue;
-        if (de.attrs & FAT_ATTR_VOLUME)
-            continue;
-        fat_format_name(&de, nm);
-        if (nm[0] == '.' && nm[1] == '\0')
-            continue;
-        if (nm[0] == '.' && nm[1] == '.' && nm[2] == '\0')
-            continue;
-        fb_add(nm, (de.attrs & FAT_ATTR_DIRECTORY) ? FK_DIR : FK_FILE);
+        fb_add(de->d_name, (de->d_attr & FAT_ATTR_DIRECTORY) ? FK_DIR : FK_FILE);
     }
-    syscall_int40(SYSCALL_CLOSEDIR, 0, 0, (u16)&dir, 0, 0, 0);
+    closedir(dp);
 
     fb_sort();
 }
@@ -111,9 +97,8 @@ int dlg_filebox(char *out, int save)
     int top = 2, w = 44, left = (COLS - w) / 2;
     int lrows = 13, lrow0 = top + 4;
     int sel = 0, off = 0, focus_list = 1;
-    int i, r;
+    int i, r, th;
     unsigned k;
-    u16 th;
 
     namebuf[0] = '\0';
     f.buf       = namebuf;
@@ -133,7 +118,7 @@ int dlg_filebox(char *out, int save)
                  save ? " Lagre som " : " " S_AA "pne fil ", A_DLG);
         vid_puts(top + 1, left + 2, "Filnavn:", A_DLG);
         dlg_field_draw(top + 1, left + 11, w - 13, &f);
-        syscall_int40(SYSCALL_GETCWD, 0, 0, (u16)cwd, (u16)sizeof(cwd), 0, 0);
+        getcwd(cwd, (u16)sizeof(cwd));
         cwd[w - 4] = '\0';
         vid_puts(top + 2, left + 2, cwd, A_DLG);
 
@@ -170,7 +155,7 @@ int dlg_filebox(char *out, int save)
                     continue;
                 namebuf[f.len] = '\0';
             } else if (fb_kind[sel] == FK_DIR) {
-                syscall_int40(SYSCALL_CHDIR, 0, (u16)fb_name[sel], 0, 0, 0, 0);
+                chdir(fb_name[sel]);
                 fb_read_dir();
                 sel = off = 0;
                 continue;
@@ -178,10 +163,9 @@ int dlg_filebox(char *out, int save)
                 strcpy(namebuf, fb_name[sel]);
             }
             if (save) {
-                th = (u16)syscall_int40(SYSCALL_OPEN, 0,
-                                        (u16)namebuf, 0, 0, 0, 0);
-                if (th != 0xFFFFu) {
-                    syscall_int40(SYSCALL_CLOSE, 0, th, 0, 0, 0, 0);
+                th = open(namebuf, O_RDONLY);
+                if (th >= 0) {
+                    close(th);
                     if (dlg_msgbox("Filen finnes - overskrive?", DB_JNA)
                             != DR_JA)
                         continue;

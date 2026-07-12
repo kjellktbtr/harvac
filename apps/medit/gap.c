@@ -4,8 +4,7 @@
 
 #include "medit.h"
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "stdlib.h"
 #include "gap.h"
 
 static u8 __far *buf;
@@ -24,7 +23,7 @@ int gb_init(void)
 
     for (i = 0; i < 3 && seg == 0; i++) {
         paras = want[i];
-        seg = (u16)syscall_int40(SYSCALL_ALLOC, 0, paras, 0, 0, 0, 0);
+        seg = alloc_paras(paras);
     }
     if (seg == 0)
         return -1;

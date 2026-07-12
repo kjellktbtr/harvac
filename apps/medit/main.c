@@ -4,8 +4,7 @@
 
 #include "medit.h"
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "stdio.h"
 #include "gap.h"
 #include "doc.h"
 #include "edit.h"
@@ -104,7 +103,7 @@ void __far _main(void)
 
 static void say(const char *s)
 {
-    syscall_int40(SYSCALL_WRITE_STDOUT, 0, 0, 0, 0, (u16)s, 0);
+    fputs(s);
 }
 
 static void set_name(const char *path)

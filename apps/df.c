@@ -13,8 +13,7 @@
  */
 
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "harva.h"
 #include "stdio.h"
 #include "string.h"
 
@@ -27,7 +26,7 @@ void __far _main(void)
     uint16_t total_kb, used_kb, free_kb;
     char t[8], u[8], f[8];
 
-    syscall_int40(SYSCALL_STATFS, 0, 0, (uint16_t)sfs, 0, 0, 0);
+    sys_statfs(sfs);
 
     total_cl = sfs[0];
     free_cl  = sfs[1];

@@ -7,8 +7,6 @@
 
 #include "ncd.h"
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
 #include "fcntl.h"
 #include "unistd.h"
 #include "fileops.h"
@@ -188,11 +186,11 @@ static void launch_child(const char *cmd, const char *args, int pause)
 {
     static const char pak_msg[] = "\r\n[Press any key]";
 
-    syscall_int40(SYSCALL_CLEAR_SCREEN, 0, 0, 0, 0, 0, 0);
+    sys_clear_screen();
     spawn(cmd, args);
     if (pause) {
         /* Write directly to VGA: the child owned the screen */
-        syscall_int40(SYSCALL_WRITE_VGA, 0, 0, 0, 0, (u16)pak_msg, 0);
+        sys_write_vga(pak_msg);
         kbd_get();
     }
     panel_refresh(&panel_left);

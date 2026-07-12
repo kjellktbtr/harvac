@@ -17,6 +17,7 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
+#include "harva.h"
 #include "stdio.h"
 #include "string.h"
 #include "fcntl.h"
@@ -328,7 +329,7 @@ void __far _main(void)
                 fputs("\r\n");
             }
         } else if (strcmp(line + i, "clear") == 0) {
-            syscall_int40(SYSCALL_CLEAR_SCREEN, 0, 0, 0, 0, 0, 0);
+            sys_clear_screen();
         } else if (strcmp(line + i, "cd") == 0) {
             cmd_cd(line + j);
         } else if (strcmp(line + i, "pwd") == 0) {

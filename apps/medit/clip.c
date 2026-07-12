@@ -4,8 +4,7 @@
 
 #include "medit.h"
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "stdlib.h"
 #include "gap.h"
 #include "clip.h"
 
@@ -22,7 +21,7 @@ int clip_set(u16 pos, u16 n)
     if (n == 0)
         return 0;
 
-    cseg = (u16)syscall_int40(SYSCALL_ALLOC, 0, (n + 15) >> 4, 0, 0, 0, 0);
+    cseg = alloc_paras((n + 15) >> 4);
     if (cseg == 0)
         return -1;
 

@@ -21,3 +21,8 @@ uint16_t alloc_paras(uint16_t n)
 {
     return (uint16_t)syscall_int40(SYSCALL_ALLOC, 0, n, 0, 0, 0, 0);
 }
+
+void free_paras(uint16_t seg)
+{
+    syscall_int40(SYSCALL_FREE, 0, seg, 0, 0, 0, 0);
+}

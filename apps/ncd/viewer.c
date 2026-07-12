@@ -5,8 +5,7 @@
 
 #include "ncd.h"
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "stdlib.h"
 #include "fcntl.h"
 #include "unistd.h"
 #include "viewer.h"
@@ -125,7 +124,7 @@ void viewer_open(const char *path)
     /* Allocate far segment if not already done */
     if (!viewer_seg) {
         /* 4096 bytes = 256 paragraphs */
-        viewer_seg = (u16)syscall_int40(SYSCALL_ALLOC, 0, 256, 0, 0, 0, 0);
+        viewer_seg = alloc_paras(256);
         if (!viewer_seg) return;
     }
 

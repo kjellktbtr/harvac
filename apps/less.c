@@ -10,8 +10,7 @@
  */
 
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "harva.h"
 #include "stdio.h"
 #include "fcntl.h"
 #include "unistd.h"
@@ -95,7 +94,7 @@ void __far _main(void)
     }
 
     /* Clear screen on exit */
-    syscall_int40(SYSCALL_CLEAR_SCREEN, 0, 0, 0, 0, 0, 0);
+    sys_clear_screen();
 }
 
 /* ─── Read all lines from fd into the lines[] buffer ─── */
@@ -129,7 +128,7 @@ static void draw_page(int top)
 
     if (end > nlines) end = nlines;
 
-    syscall_int40(SYSCALL_CLEAR_SCREEN, 0, 0, 0, 0, 0, 0);
+    sys_clear_screen();
 
     /* Print content lines */
     for (i = top; i < end; i++) {

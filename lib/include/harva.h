@@ -68,4 +68,22 @@ void fmt_uint_field(char *out, uint32_t val, uint16_t width);
 #define FAT_ATTR_VOLUME     0x08
 #define FAT_ATTR_READONLY   0x01
 
+/* ─── OS syscall wrappers ─── */
+
+/* Clear the screen and reset the text cursor to the top-left. */
+void sys_clear_screen(void);
+
+/* Write a NUL-terminated string directly to VGA (bypasses stdout fd). */
+void sys_write_vga(const char *s);
+
+/* Fill ver[0..3] with the kernel version: ver[0]=major, ver[1]=minor. */
+void sys_get_version(uint8_t *ver);
+
+/* Fill an 8-byte statfs buffer: [0-1]=total_clusters, [2-3]=free_clusters,
+ * [4]=sectors_per_cluster, [5]=pad, [6-7]=bytes_per_sector. */
+void sys_statfs(uint16_t *buf);
+
+/* Fill a 4-byte meminfo buffer: [0]=total_paras, [1]=used_paras. */
+void sys_mem_info(uint16_t *buf);
+
 #endif /* HARVA_H */

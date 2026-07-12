@@ -14,4 +14,9 @@ int   abs(int n);
  * Returns the base segment, or 0 on failure. */
 uint16_t alloc_paras(uint16_t n);
 
+/* Release a segment previously returned by alloc_paras().
+ * In current Harvac, all segments are freed on process exit; this call is
+ * a no-op in the kernel but documents intent and keeps call sites clean. */
+void free_paras(uint16_t seg);
+
 #endif /* STDLIB_H */

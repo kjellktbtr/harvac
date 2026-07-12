@@ -3,8 +3,7 @@
  */
 
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "harva.h"
 #include "stdio.h"
 #include "string.h"
 
@@ -13,7 +12,7 @@ void __far _main(void)
     uint8_t ver[4];
     char buf[8];
 
-    syscall_int40(SYSCALL_GET_VERSION, 0, (uint16_t)ver, 0, 0, 0, 0);
+    sys_get_version(ver);
 
     fputs("Harvac v");
     utoa(ver[0], buf);

@@ -4,8 +4,7 @@
 
 #include "ncd.h"
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "stdlib.h"
 #include "unistd.h"
 #include "dirent.h"
 #include "panel.h"
@@ -72,14 +71,14 @@ void panel_init(panel_t *p)
     p->sel = 0;
     p->scroll = 0;
     p->cwd[0] = '\0';
-    p->ent_seg = (u16)syscall_int40(SYSCALL_ALLOC, 0, PANEL_ENT_PARAS, 0, 0, 0, 0);
+    p->ent_seg = alloc_paras(PANEL_ENT_PARAS);
 }
 
 void panel_done(panel_t *p)
 {
     /* Free not strictly needed (child exit reclaims), but good form */
     if (p->ent_seg) {
-        syscall_int40(SYSCALL_FREE, 0, p->ent_seg, 0, 0, 0, 0);
+        free_paras(p->ent_seg);
         p->ent_seg = 0;
     }
 }

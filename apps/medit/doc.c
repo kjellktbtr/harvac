@@ -1,13 +1,12 @@
 /* doc.c -- Document layer for Harvac port of MEDIT.
- * File I/O uses SYSCALL_OPEN/READ/WRITE/CREATE/CLOSE. Because SYSCALL_READ
- * and SYSCALL_WRITE copy through caller_ds (the process segment), a small
- * static near buffer is used as an intermediary; far_copy transfers data
+ * File I/O goes through POSIX open/read/write/close. A small static near
+ * buffer is used as intermediary for read_far/write_far; far_copy moves data
  * between that buffer and the far gap segment. */
 
 #include "medit.h"
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "fcntl.h"
+#include "unistd.h"
 #include "gap.h"
 #include "doc.h"
 
@@ -57,35 +56,37 @@ u16 doc_prev_line(u16 start)
     return doc_line_home(p);
 }
 
-/* Read up to n bytes from handle into far buffer dst. Returns bytes read. */
-static u16 read_far(u16 h, u8 __far *dst, u16 n)
+/* Read up to n bytes from fd into far buffer dst. Returns bytes read. */
+static u16 read_far(int h, u8 __far *dst, u16 n)
 {
     static u8 tmp[256];
-    u16 total = 0, chunk, nr;
+    u16 total = 0, chunk;
+    int nr;
     while (n > 0) {
         chunk = (n > 256) ? 256 : n;
-        nr = (u16)syscall_int40(SYSCALL_READ, 0, h, (u16)tmp, chunk, 0, 0);
-        if (nr == 0)
+        nr = read(h, tmp, chunk);
+        if (nr <= 0)
             break;
-        far_copy(dst + total, (u8 __far *)tmp, nr);
-        total += nr;
-        n -= nr;
+        far_copy(dst + total, (u8 __far *)tmp, (u16)nr);
+        total += (u16)nr;
+        n -= (u16)nr;
     }
     return total;
 }
 
-/* Write n bytes from far buffer src to handle. Returns bytes written. */
-static u16 write_far(u16 h, const u8 __far *src, u16 n)
+/* Write n bytes from far buffer src to fd. Returns bytes written. */
+static u16 write_far(int h, const u8 __far *src, u16 n)
 {
     static u8 tmp[256];
-    u16 total = 0, chunk, nw;
+    u16 total = 0, chunk;
+    int nw;
     while (n > 0) {
         chunk = (n > 256) ? 256 : n;
         far_copy((u8 __far *)tmp, src + total, chunk);
-        nw = (u16)syscall_int40(SYSCALL_WRITE, 0, h, (u16)tmp, chunk, 0, 0);
-        if (nw == 0)
+        nw = write(h, tmp, chunk);
+        if (nw <= 0)
             break;
-        total += nw;
+        total += (u16)nw;
         n -= chunk;
     }
     return total;
@@ -93,11 +94,12 @@ static u16 write_far(u16 h, const u8 __far *src, u16 n)
 
 int doc_load(const char *path)
 {
-    u16 h, got;
+    int h;
+    u16 got;
     u8 __far *raw;
 
-    h = (u16)syscall_int40(SYSCALL_OPEN, 0, (u16)path, 0, 0, 0, 0);
-    if (h == 0xFFFFu)
+    h = open(path, O_RDONLY);
+    if (h < 0)
         return DOC_ERR_OPEN;
 
     gb_reset();
@@ -109,7 +111,7 @@ int doc_load(const char *path)
     {
         u16 maxt = (u16)(gb_cap() - 1000);
         got = read_far(h, raw, (u16)(maxt + 1));
-        syscall_int40(SYSCALL_CLOSE, 0, h, 0, 0, 0, 0);
+        close(h);
 
         if (got > maxt) {
             gb_reset();
@@ -122,22 +124,23 @@ int doc_load(const char *path)
 
 int doc_save(const char *path)
 {
-    u16 h, put, len;
+    int h;
+    u16 put, len;
     u8 __far *raw;
 
-    h = (u16)syscall_int40(SYSCALL_CREATE, 0, (u16)path, 0, 0, 0, 0);
-    if (h == 0xFFFFu)
+    h = creat(path);
+    if (h < 0)
         return DOC_ERR_OPEN;
 
     len = gb_len();
     raw = gb_raw();
     if (len > 0) {
         put = write_far(h, raw, len);
-        syscall_int40(SYSCALL_CLOSE, 0, h, 0, 0, 0, 0);
+        close(h);
         if (put != len)
             return DOC_ERR_IO;
     } else {
-        syscall_int40(SYSCALL_CLOSE, 0, h, 0, 0, 0, 0);
+        close(h);
     }
     return DOC_OK;
 }

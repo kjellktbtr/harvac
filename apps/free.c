@@ -5,8 +5,7 @@
  */
 
 #include "types.h"
-#include "constants.h"
-#include "port_io.h"
+#include "harva.h"
 #include "stdio.h"
 #include "string.h"
 
@@ -18,7 +17,7 @@ void __far _main(void)
     uint16_t total_kb, used_kb, free_kb;
     char t[8], u[8], f[8];
 
-    syscall_int40(SYSCALL_MEM_INFO, 0, 0, (uint16_t)meminfo, 0, 0, 0);
+    sys_mem_info(meminfo);
     total_paras = meminfo[0];
     used_paras  = meminfo[1];
     free_paras  = (used_paras <= total_paras) ? total_paras - used_paras : 0;
