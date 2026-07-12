@@ -2,8 +2,9 @@
 
 **HarvaC** is a 16-bit real-mode x86 operating system written primarily in C
 (OpenWatcom), with assembly only where unavoidable. It boots from a FAT16
-hard-disk image, has a shell with batch scripting, a full-screen text editor,
-and a serial file-transfer tool with FUSE mounting on the host side.
+hard-disk image, has a shell with pipes and batch scripting, a full-screen
+text editor, a dual-pane file manager, and a serial file-transfer tool with
+FUSE mounting on the host side.
 
 ## Why this exists
 
@@ -28,9 +29,17 @@ assembly, and small-model 64 KB segments.
   timer), VGA text + serial console, PS/2 keyboard (IRQ1)
 - **Filesystem:** FAT16 read/write with subdirectories, 8.3 names, VFS with
   CWD and mount table
-- **Shell (`SHELL.COM`):** resident user-space shell; built-ins, external
-  `.COM` programs (searched in `BIN/`), output redirection (`>`), and `.BAT`
-  batch scripts with `@echo off` semantics
+- **POSIX-like libc** (`lib/posix/`): open, read, write, lseek, dirent, stat,
+  stdio, stdlib, errno, fnmatch — a clean API layer for user programs
+- **HDK TUI library** (`lib/hdk/`): video, keyboard, dialog, far memory, and
+  formatted output — powers NCD and EDIT
+- **Shell (`SHELL.COM`):** user-space shell with pipes (`|`), output
+  redirection (`>`), built-in commands, `.BAT` batch scripts, and external
+  `.COM` programs loaded from `BIN/`
+- **Command suite:** `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `cat`, `ls`,
+  `grep`, `head`, `tail`, `sort`, `cut`, `less`, `free`, `df`, `du`, `uname`
+- **NCD:** dual-pane file manager with navigation, viewing, copy/move/delete
+  using far-segment memory allocation for large file operations
 - **EDIT:** full-screen text editor (a port of the MEDIT DOS editor) with
   menus, clipboard, search/replace — CGA-snow aware
 - **XFER:** serial file-transfer agent; the host side (`tools/serial-xfer/`)
@@ -53,8 +62,8 @@ qemu-system-i386 -m 4 -drive file=harvac.img,format=raw
 make qemu
 ```
 
-At the `/>` prompt, try `help`, `ls`, `demo`, `cd DOCS` + `cat MANUAL.TXT`,
-or `edit HELLO.TXT`.
+At the `/>` prompt, try `help`, `ls`, `cat README.TXT`, `ls | grep -i txt`,
+`ncd`, or `edit HELLO.TXT`.
 
 **On real hardware:** write `harvac.img` raw to a small hard disk / CF card
 (e.g. XT-IDE) and boot an 8088-class or later PC. Use `XFER` plus a
@@ -75,9 +84,11 @@ make              # build everything into harvac.img
 make run          # build and launch QEMU
 make qemu         # launch QEMU without rebuilding
 make clean        # remove build artifacts
+make check        # compile all sources without linking (syntax/lint check)
+make test         # automated QEMU smoke tests
 ```
 
-Or directly: `python3 build.py [--run | --qemu-only | --clean]`.
+Or directly: `python3 build.py [--run | --qemu-only | --display | --xfer-run | --clean | --check | --test]`.
 
 ## How it boots
 
@@ -117,7 +128,11 @@ harvac/
 │   ├── shell/            # kernel fallback shell + COM executor
 │   ├── lib/              # freestanding string routines
 │   └── include/          # headers (syscall numbers, port I/O pragmas)
-├── apps/                 # user programs: shell, ls, cat, uname, xfer, medit/
+├── apps/                 # user programs: shell, cat, grep, ls, ncd/, medit/, xfer.asm
+├── lib/
+│   ├── posix/            # POSIX-like libc (open, read, write, dirent, stat, stdio, stdlib, etc.)
+│   ├── hdk/              # HDK TUI library (video, keyboard, dialog, far memory, formatting)
+│   └── include/          # shared library headers (args.h, fcntl.h, unistd.h, etc.)
 ├── build/                # prebuilt binaries (KERNEL.COM, SHELL.COM, BIN apps)
 ├── os-docs/              # end-user docs (also embedded on the image as DOCS/)
 ├── tools/serial-xfer/    # host-side transfer/mount tools (git submodule)
