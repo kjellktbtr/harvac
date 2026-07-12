@@ -8,8 +8,6 @@ sources:
   - apps/ncd/viewer.c
   - apps/ncd/fs.c
   - apps/ncd/fs.h
-  - apps/ncd/far.c
-  - apps/ncd/far.h
   - build.py
 related:
   - "[[syscall-dispatch]]"
@@ -181,6 +179,65 @@ because the 16 KB process slot was too small for its near BSS, which then
 collided with its far gap buffer — see the `PROC_PARAS` note in
 [[com-executor]].
 
+## Round 3 fixes (2026-07-12)
+
+Interactive defects fixed after Phase 12 refactor:
+
+| # | Symptom | Fix |
+|---|---------|-----|
+| 1 | Stale VGA output after running a child | `vid_dirty_all()` in `launch_child()` forces full repaint (shadow was stale after child wrote directly to VGA) |
+| 2 | Ins didn't advance cursor | `panel_down()` called after `panel_toggle_select()` — standard Norton behaviour |
+| 3 | Left arrow never navigated to parent | Kernel keyboard driver: gray nav keys emit E0 2A/AA "fake shift"; added guard in `process_scancode()` to discard them when `ext_prefix` is set |
+| 4 | Copy showed no progress | New `dlg_progress()` in HDK; called before each `ncd_copy_recursive()` in `handle_f5()`; shows cur/total, % bar, and middle-truncated filename |
+| 5 | Copied files had zeroed date/time | New `SYSCALL_UTIME` (0x1A) sets a file's FAT16 timestamp by path; `ncd_copy_file()` stats the source first and stamps the copy |
+
+## Round 4 — POSIX API migration (2026-07-12)
+
+All direct `syscall_int40()` calls in NCD (≈18 calls scattered across four
+files) were replaced with POSIX wrappers from `lib/posix/`:
+
+| Old | New | Header |
+|-----|-----|--------|
+| `ncd_chdir(path)` | `chdir(path)` | `unistd.h` |
+| `ncd_getcwd(buf, n)` | `getcwd(buf, n)` | `unistd.h` |
+| `ncd_opendir(&dir)` | `opendir(".")` → `DIR *` | `dirent.h` |
+| `ncd_readdir(&dir, &ent)` | `readdir(dp)` → `struct dirent *` | `dirent.h` |
+| `ncd_closedir(&dir)` | `closedir(dp)` | `dirent.h` |
+| `ncd_open(path)` | `open(path, O_RDONLY)` | `fcntl.h` / `unistd.h` |
+| `ncd_read(h, buf, n)` | `read(fd, buf, n)` | `unistd.h` |
+| `ncd_close(h)` | `close(fd)` | `unistd.h` |
+| `ncd_create(path)` | `open(path, O_WRONLY\|O_CREAT)` | `fcntl.h` |
+| `ncd_mkdir(path)` | `mkdir(path)` | `unistd.h` |
+| `ncd_rmdir(path)` | `rmdir(path)` | `unistd.h` |
+| `ncd_rename(old, new)` | `rename(old, new)` | `unistd.h` |
+| `ncd_delete(path)` | `unlink(path)` | `unistd.h` |
+| `ncd_stat(path, &ent)` | `stat(path, &st)` | `sys/stat.h` |
+| `ncd_exec(cmd, args)` | `exec(cmd, args)` | `unistd.h` |
+| `ncd_exit()` | `_exit(0)` | `unistd.h` |
+| `ncd_copy_recursive()` | `copy_tree()` | `fileops.h` |
+| `ncd_delete_recursive()` | `remove_tree()` | `fileops.h` |
+| `ncd_format_date()` | `fat_format_date()` | `harva.h` |
+| `ncd_format_time()` | `fat_format_time()` | `harva.h` |
+
+`fs.c` / `fs.h` now contain only two thin wrappers (`ncd_copy_recursive` /
+`ncd_delete_recursive`) that call `copy_tree` / `remove_tree` from
+`lib/posix/fileops.c`. `panel.c` uses POSIX `DIR *` / `struct dirent *`
+directly; `viewer.c` uses POSIX `open` / `read` / `close`.
+
+Two intentional raw `syscall_int40` calls remain in `main.c`:
+- `SYSCALL_CLEAR_SCREEN` — no POSIX equivalent (VGA-specific).
+- `SYSCALL_WRITE_VGA` — likewise VGA-only.
+
+`panel.c` and `viewer.c` also keep `syscall_int40(SYSCALL_ALLOC, ...)` for
+far-segment allocation; there is no POSIX analog for OS-specific far memory.
+
+A `utime()` wrapper was added to `lib/posix/unistd.c` and declared in
+`lib/include/unistd.h` (wraps `SYSCALL_UTIME`, 0x1A):
+```c
+int utime(const char *path, uint16_t date, uint16_t time);
+```
+`lib/posix/fileops.c` now uses it instead of the raw syscall.
+
 ## Source Files
 
 | File | Role |
@@ -188,9 +245,5 @@ collided with its far gap buffer — see the `PROC_PARAS` note in
 | `main.c` | Entry point, main loop, F-key handlers |
 | `panel.c` / `panel.h` | Pane data model, far-segment entries, rendering |
 | `viewer.c` / `viewer.h` | Full-screen file viewer |
-| `fs.c` / `fs.h` | Syscall wrappers, name formatting, recursive copy/delete |
-| `far.c` / `far.h` | Far-segment copy/move helpers (copied from `apps/medit/`) |
-| `vid.c` / `vid.h` | VGA output: fills, puts, cursor, double-buffered flush |
-| `kbd.c` / `kbd.h` | Keyboard input via `INT 0x40` |
-| `dlg.c` / `dlg.h` | Input dialogs and message boxes |
-| `ncd.h` | Types, layout constants, key codes, string aliases |
+| `fs.c` / `fs.h` | Thin wrappers for `copy_tree` / `remove_tree` |
+| `ncd.h` | Types, layout constants |

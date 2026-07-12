@@ -106,6 +106,34 @@ uint16_t fat16_read_fat(fat16_fs_t *fs, uint16_t cluster)
     return *(uint16_t *)(sec_buf + entry_in_sector);
 }
 
+/* ─── Count free clusters by scanning FAT sector by sector ─── */
+/* 32 disk reads (one per FAT sector) instead of ~8000 (one per cluster). */
+uint16_t fat16_count_free_clusters(fat16_fs_t *fs)
+{
+    uint16_t fat_sector;
+    uint32_t fat_lba = fs->partition_lba + fs->reserved_sectors;
+    uint16_t free_count = 0;
+    uint16_t cl_base = 0;  /* cluster index of first entry in this sector */
+
+    for (fat_sector = 0; fat_sector < fs->fat_sectors; fat_sector++) {
+        uint16_t i;
+        if (disk_read_sectors(fs->drive, fat_lba + fat_sector, 1,
+                              KERNEL_SEGMENT, (uint16_t)sec_buf) != 0)
+            break;
+        /* Each 512-byte sector holds 256 FAT16 entries */
+        for (i = 0; i < 256; i++) {
+            uint16_t cl = cl_base + i;
+            if (cl < 2) continue;              /* entries 0 and 1 are reserved */
+            if (cl >= fs->total_clusters + 2) goto done;
+            if (*(uint16_t *)(sec_buf + i * 2) == FAT16_FREE)
+                free_count++;
+        }
+        cl_base += 256;
+    }
+done:
+    return free_count;
+}
+
 /* ─── Read one sector from a cluster ─── */
 uint16_t fat16_read_cluster(fat16_fs_t *fs, uint16_t cluster,
                             uint16_t sector_off, uint8_t *buffer)
@@ -1112,4 +1140,34 @@ uint16_t fat16_rename(fat16_fs_t *fs, const uint8_t *old_name,
                        const uint8_t *new_name)
 {
     return fat16_rename_in_dir(fs, 0, old_name, new_name);
+}
+
+/* ─── Set date/time on a directory entry ─── */
+/* dir_cluster 0 = root.  Writes FAT16-format date (CX) and time (DX)
+ * to directory entry offsets 22-23 (time) and 24-25 (date).
+ * Mirrors the fat16_update_fsize() pattern. */
+uint16_t fat16_set_datetime_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                                   const uint8_t *name83,
+                                   uint16_t date, uint16_t time)
+{
+    fat16_dirent_t dirent;
+    uint32_t sector_lba;
+    uint16_t entry_offset;
+
+    if (fat16_find_in_dir(fs, dir_cluster, name83, &dirent,
+                          &sector_lba, &entry_offset) != 0)
+        return ERR_NOT_FOUND;
+
+    if (disk_read_sectors(fs->drive, sector_lba, 1, KERNEL_SEGMENT,
+                          (uint16_t)sec_buf) != 0)
+        return ERR_DISK_ERROR;
+
+    /* FAT16 dirent layout: offset 22 = creation/write time, 24 = date */
+    sec_buf[entry_offset + 22] = (uint8_t)(time & 0xFF);
+    sec_buf[entry_offset + 23] = (uint8_t)(time >> 8);
+    sec_buf[entry_offset + 24] = (uint8_t)(date & 0xFF);
+    sec_buf[entry_offset + 25] = (uint8_t)(date >> 8);
+
+    return disk_write_sectors(fs->drive, sector_lba, 1, KERNEL_SEGMENT,
+                              (uint16_t)sec_buf);
 }

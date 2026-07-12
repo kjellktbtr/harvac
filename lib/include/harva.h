@@ -52,6 +52,17 @@ void fat_format_time(uint16_t date, uint16_t time, char *out);
 /* Return 1 if ent is a "." or ".." directory entry (dot entry). */
 int fat_is_dot_entry(const fat_dirent_t *ent);
 
+/* Write `src` middle-truncated to exactly `width` chars into `out`.
+ * If src fits, it is copied verbatim (NUL-terminated).
+ * If it is too long, the result is "head...tail" where head and tail
+ * are chosen so the total is `width`.  `out` must be width+1 bytes.
+ * Minimum useful width is 5 (1 head + "..." + 1 tail). */
+void fmt_ellipsis_mid(char *out, const char *src, uint16_t width);
+
+/* Format a u32 integer right-aligned in a field of `width` ASCII digits.
+ * Pads with spaces on the left.  out must be width+1 bytes. */
+void fmt_uint_field(char *out, uint32_t val, uint16_t width);
+
 /* FAT16 attribute bit (subset shared with constants.h DIR_ATTR_*) */
 #define FAT_ATTR_DIRECTORY  0x10
 #define FAT_ATTR_VOLUME     0x08

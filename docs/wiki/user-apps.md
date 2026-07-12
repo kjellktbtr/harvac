@@ -6,13 +6,28 @@ sources:
   - apps/cat.c
   - apps/ls.c
   - apps/uname.c
+  - apps/cp.c
+  - apps/mv.c
+  - apps/rm.c
+  - apps/mkdir.c
+  - apps/rmdir.c
+  - apps/grep.c
+  - apps/head.c
+  - apps/tail.c
+  - apps/sort.c
+  - apps/cut.c
+  - apps/less.c
+  - apps/df.c
+  - apps/du.c
+  - apps/free.c
   - build.py
 related:
   - "[[com-executor]]"
   - "[[syscall-dispatch]]"
+  - "[[shell-commands]]"
   - "[[plan]]"
 created: 2026-07-06
-updated: 2026-07-11
+updated: 2026-07-12T15:50
 confidence: high
 ---
 
@@ -43,14 +58,49 @@ in the order functions appear in the object file (i.e., source order). The
 `.COM` format always starts execution at file offset 0 (which maps to memory
 offset `0x0100` after loading). If any helper function is defined before
 `_main` in the source, the binary starts with that helper's code — the CPU
-executes it instead of `_main`, producing garbage output or a crash.
+executes it instead of `_main`, producing garbage output or a crash.  In
+practice this causes an immediate machine reset (triple-fault) because the
+helper returns via near `ret` instead of far `retf`.
 
-**Pattern:** Define `_main` first, add forward declarations for all helpers at
-the top, then define helpers after `_main`. See `apps/ls.c` and `apps/shell.c`.
+**Pattern:** Add forward declarations (prototypes) for all helpers directly
+after any `static` data declarations, then put `_main` as the first **function
+definition** in the file, followed by the helper definitions. See `apps/ls.c`
+and `apps/shell.c` as reference, and all other apps in `apps/`.
 
-Confirmed by `xxd`: the old debug `ls.c` had `putch` defined before `_main`;
-the LS.COM binary started with `putch`'s prologue (`53 51 52 56 57 31 ff...`)
-instead of `_main`'s stack frame setup. The fix moved `_main` first.
+Static data declarations (`static char buf[N];`, `static int nlines;`, etc.)
+are emitted to `_DATA`/`_BSS` segments, not `_TEXT`, so they do **not** push
+`_main` out of first position — only static function definitions do.
+
+**Build-time guard (`build.py` `_parse_main_addr`):** after every C app link,
+`build_app` generates a wlink map file (`option map=…`), parses the Memory Map
+section for `_main_` (OpenWatcom-mangled name), and asserts its address equals
+`0x0100`. If not, the build fails with a diagnostic naming the app and
+explaining the fix. This makes the rule a hard compile-time invariant, not just
+a convention.
+
+### Piped Stdin Buffering (`lib/posix/stdio.c`)
+
+`getline_fd` in `lib/posix/stdio.c` reads characters via `glfd_getc(fd)`.
+For file fds (3+) it already uses a 512-byte sector buffer to avoid per-byte
+disk I/O.  For `fd=0` (stdin), it previously did a 1-byte `read(0, &c, 1)` on
+every character.  When stdin is **piped** (`g_stdin` set by the shell), each
+1-byte call dispatches `SYSCALL_READ_STDIN` to the kernel, which calls
+`fat16_read` with `count=1` — one full sector read per byte.  For a 1 KB pipe
+payload that is ~1000 sector reads instead of 2.
+
+**Fix (`lib/posix/stdio.c`):** `glfd_getc` now queries `SYSCALL_ISATTY` once
+on the first call with `fd=0` and caches the result in `_stdin_is_tty` (an
+`int8_t` initialized to `-1` in the data segment so it survives BSS zeroing).
+
+- **Interactive tty:** keep the 1-byte read so the kernel line editor semantics
+  (echo, backspace, Ctrl-D) are preserved.
+- **Piped stdin:** reuse the same `_glfd_buf[512]` / `_glfd_pos` / `_glfd_end`
+  buffer already used for file fds.  `read(0, _glfd_buf, 512)` calls
+  `SYSCALL_READ_STDIN` with `maxlen=512`, which in turn calls `fat16_read`
+  with `count=512` — one sector read per 512 bytes of pipe data.
+
+No kernel change is needed; the kernel's pipe branch already honours the
+requested `maxlen`.
 
 ## Cross-Segment Buffer Access
 
@@ -148,6 +198,15 @@ duplicated every app's data on the image because the root copy's FAT chain was
 never freed. The direct-to-BIN approach (2026-07-11) writes each app once.
 Adding a new app to the image is now a one-line change to `BIN_APPS`.
 
-Note: `BIN/` is a single-cluster directory (512 bytes = 16 entries, 2 used by
-`.` and `..`), so it holds at most 14 apps before `write_file_to_subdir()`
-would need to extend the cluster chain.
+`BIN/` starts as a single-cluster directory (512 bytes = 16 entries, 2 used by
+`.` and `..`), so it holds at most 14 apps in one cluster. When the directory
+is full, `write_file_to_subdir()` automatically extends the FAT chain: it
+allocates a new cluster, zeroes it, chains `current → new → EOC`, and continues
+writing. This is transparent — no manual directory pre-sizing is required.
+
+Additionally, `_read_fat()` and `_write_fat()` in `build.py` now read/write the
+full FAT (all `_FAT_SECTORS = 32` sectors = 16 KB), not just the first sector.
+The earlier one-sector read limited cluster discovery to clusters 2–255 (~127 KB
+of data space), causing "Not enough clusters" failures for larger app sets.
+
+For the full list of commands and their behavior, see [[shell-commands]].

@@ -54,6 +54,20 @@ void syscall_finalize_redirect(void)
     g_redirect = 0xFFFF;
 }
 
+/* ─── Stdin redirect ─── */
+/* g_stdin: 0xFFFF = keyboard (normal), else index into open_files[].
+ * Enables pipe support: shell sets g_stdin to a temp file before exec. */
+static uint16_t g_stdin = 0xFFFF;
+
+/* Close any active stdin redirect; called by boot_shell() on exec re-entry. */
+void syscall_finalize_stdin(void)
+{
+    if (g_stdin < MAX_OPEN_FILES) {
+        open_files[g_stdin].used = 0;
+    }
+    g_stdin = 0xFFFF;
+}
+
 /* ─── Mounted FAT16 filesystem (single partition, no VFS yet) ─── */
 static fat16_fs_t root_fs;
 
@@ -310,12 +324,36 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
         g_redirect = bx;
         break;
 
+    case SYSCALL_SET_STDIN:
+        /* BX = file handle to redirect stdin to, or 0xFFFF to clear */
+        g_stdin = bx;
+        break;
+
+    case SYSCALL_ISATTY:
+        /* Returns 1 if stdin is the keyboard (no redirect), 0 if piped. */
+        ret = (g_stdin == 0xFFFF) ? 1 : 0;
+        break;
+
     case SYSCALL_READ_STDIN:
         {
             uint16_t buf_off = si;
             uint16_t maxlen = di;
             uint16_t count = 0;
 
+            /* Stdin redirect: read raw bytes from file (pipe support).
+             * Returns actual byte count (0 = EOF); no echo or editing. */
+            if (g_stdin < MAX_OPEN_FILES && open_files[g_stdin].used) {
+                static uint8_t tmp_in[512];
+                uint16_t chunk = (maxlen > sizeof(tmp_in)) ? sizeof(tmp_in) : maxlen;
+                uint16_t n = fat16_read(&open_files[g_stdin].file, tmp_in, chunk);
+                uint16_t i;
+                for (i = 0; i < n; i++)
+                    write_far_b(caller_ds, buf_off + i, tmp_in[i]);
+                ret = n;
+                break;
+            }
+
+            /* Normal interactive stdin: keyboard line editor */
             for (;;) {
                 char c = (char)(uint8_t)keyboard_getkey();
                 if (c == '\r' || c == '\n') {
@@ -334,6 +372,9 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                     }
                     continue;
                 }
+                /* Ctrl-D (0x04) = EOF on interactive stdin */
+                if ((uint8_t)c == 0x04)
+                    break;
                 if (count < maxlen - 1) {
                     write_far_b(caller_ds, buf_off + count, (uint8_t)c);
                     count++;
@@ -672,6 +713,22 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
             }
 
             ret = fat16_rename_in_dir(old_fs, old_dir, old_83, new_83);
+        }
+        break;
+
+    case SYSCALL_UTIME:
+        {
+            /* SI = path offset (caller DS), CX = FAT16 date, DX = FAT16 time */
+            static uint8_t ut_83[12];
+            static uint16_t ut_dir;
+            static fat16_fs_t *ut_fs;
+
+            if (resolve_user_path(caller_ds, si, &ut_fs, &ut_dir, ut_83) != 0) {
+                ret = ERR_NOT_FOUND;
+                break;
+            }
+            ret = fat16_set_datetime_in_dir(ut_fs, ut_dir, ut_83,
+                                            (uint16_t)cx, (uint16_t)dx);
         }
         break;
 
@@ -1096,7 +1153,10 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
             child_sp = PROC_SP;
 
             /* Write argument string to child_seg:0x0082 (PSP argv area).
-             * cx holds the caller's argument offset (0 if none). */
+             * cx holds the caller's argument offset (0 if none).
+             * PSP tail spans 0x82..0xFF (125 usable bytes); the child's
+             * code starts at 0x100.  Cap at k < 125 so the NUL terminator
+             * at 0x0082+k never reaches 0x0100 and overwrites the entry point. */
             {
                 uint16_t arg_src = cx;
                 uint16_t k = 0;
@@ -1106,7 +1166,7 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                         c2 = read_far_b(caller_ds, arg_src + k);
                         write_far_b(child_seg, 0x0082 + k, c2);
                         k++;
-                        if (k > 127) break;
+                        if (k >= 125) break;   /* hard stop: 0x82+125 = 0xFF */
                     } while (c2 != 0);
                 }
                 write_far_b(child_seg, 0x0082 + k, 0);
@@ -1161,6 +1221,45 @@ uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
         /* No-op: memory is reclaimed when child exits via return_to_parent_
          * which resets g_next_seg to child_seg (the value saved in pctx). */
         ret = 0;
+        break;
+
+    case SYSCALL_MEM_INFO:
+        {
+            /* CX = ptr to 4-byte buffer in caller DS.
+             * [0-1] = total RAM in paragraphs (from BDA 0040:0013 in KB << 6).
+             * [2-3] = used paragraphs (= get_next_seg()). */
+            uint16_t out_off = cx;
+            uint16_t total_paras = (uint16_t)(read_far_w(0x0040, 0x0013) << 6);
+            uint16_t used_paras  = get_next_seg();
+            write_far_b(caller_ds, out_off + 0, (uint8_t)(total_paras));
+            write_far_b(caller_ds, out_off + 1, (uint8_t)(total_paras >> 8));
+            write_far_b(caller_ds, out_off + 2, (uint8_t)(used_paras));
+            write_far_b(caller_ds, out_off + 3, (uint8_t)(used_paras >> 8));
+        }
+        break;
+
+    case SYSCALL_STATFS:
+        {
+            /* CX = ptr to 8-byte statfs_t in caller DS.
+             * Layout: [0-1]=total_clusters, [2-3]=free_clusters,
+             *         [4]=sectors_per_cluster, [5]=0 (pad),
+             *         [6-7]=bytes_per_sector. */
+            uint16_t out_off = cx;
+            uint16_t total_cl = root_fs.total_clusters;
+            uint16_t free_cl;
+
+            /* Count free clusters sector-by-sector (32 reads, not ~8000). */
+            free_cl = fat16_count_free_clusters(&root_fs);
+
+            write_far_b(caller_ds, out_off + 0, (uint8_t)(total_cl));
+            write_far_b(caller_ds, out_off + 1, (uint8_t)(total_cl >> 8));
+            write_far_b(caller_ds, out_off + 2, (uint8_t)(free_cl));
+            write_far_b(caller_ds, out_off + 3, (uint8_t)(free_cl >> 8));
+            write_far_b(caller_ds, out_off + 4, root_fs.sectors_per_cluster);
+            write_far_b(caller_ds, out_off + 5, 0);
+            write_far_b(caller_ds, out_off + 6, (uint8_t)(root_fs.bytes_per_sector));
+            write_far_b(caller_ds, out_off + 7, (uint8_t)(root_fs.bytes_per_sector >> 8));
+        }
         break;
 
     default:

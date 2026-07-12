@@ -108,6 +108,7 @@ causing the filename offset to land in the wrong C parameter — always reading
 | 0x08 | `SET_STDOUT` | `BX` = file handle (0xFFFF = serial) | - |
 | 0x0A | `WRITE_VGA` | `SI` = string offset | - |
 | 0x0B | `KEY_AVAILABLE` | - | nonzero if key event buffered (non-blocking; keyboard ring buffer only, never reads the UART - safe for apps that own the serial port, e.g. XFER) |
+| 0x0C | `SET_STDIN` | `BX` = file handle (0xFFFF = keyboard) | - |
 
 #### Stdout Redirect (`SYSCALL_SET_STDOUT`)
 
@@ -120,6 +121,20 @@ which calls `fat16_write` instead of `serial_putchar`.
 be static because `fat16_write` takes a near pointer; stack variables live at
 `SS=COM_SEGMENT` but `fat16_write` dereferences via `DS=KERNEL_SEGMENT`. See
 [[syscall-dispatch#Critical: SS != DS during the handler]].
+
+#### Stdin Redirect (`SYSCALL_SET_STDIN`)
+
+`g_stdin` (file-static `uint16_t` in `syscalls.c`) mirrors `g_redirect`.
+`0xFFFF` means keyboard; any valid open-file handle redirects
+`SYSCALL_READ_STDIN` to read raw bytes from that file.
+
+When `g_stdin` is active, `SYSCALL_READ_STDIN` reads up to `DI` bytes from the
+file into `static uint8_t tmp_in[512]` and returns the byte count. Count = 0
+means EOF. Interactive EOF from the keyboard sends Ctrl-D (0x04).
+
+`syscall_finalize_stdin()` (declared in `src/include/syscall.h`) is called by
+`boot_shell()` on every exec re-entry to reset `g_stdin = 0xFFFF` and close
+any open handle. See [[shell-commands#Pipes]].
 
 #### VGA-only Write (`SYSCALL_WRITE_VGA`)
 
@@ -155,6 +170,7 @@ the file is properly flushed and the directory entry size is updated.
 | 0x16 | `DELETE` | `DS:BX` = filename | - |
 | 0x17 | `STAT` | `DS:BX` = name, `CX` = dirent ptr | - |
 | 0x18 | `RENAME` | `SI` = old-name offset, `DI` = new-name offset | 0 = OK, error otherwise |
+| 0x1A | `UTIME` | `SI` = path offset, `CX` = FAT16 date, `DX` = FAT16 time | 0 = OK, error otherwise |
 
 ### Directory (0x20-0x2F)
 
@@ -175,6 +191,28 @@ the file is properly flushed and the directory entry size is updated.
 | 0x30 | `MOUNT` | `DS:BX` = mountpoint, `CX` = drive, `DX:SI` = LBA | 0 = OK |
 | 0x31 | `UNMOUNT` | `DS:BX` = mountpoint | 0 = OK |
 | 0x32 | `LIST_MOUNTS` | - | - |
+| 0x33 | `STATFS` | `CX` = ptr to 8-byte `statfs_t` buffer | 0 = OK |
+
+#### `SYSCALL_STATFS` (0x33)
+
+Returns filesystem statistics by scanning the FAT for free clusters. The
+8-byte `statfs_t` layout:
+
+```
+[0-1]  total_clusters     (uint16_t)
+[2-3]  free_clusters      (uint16_t, computed by scanning FAT for 0x0000 entries)
+[4]    sectors_per_cluster (uint8_t)
+[5]    pad                (0)
+[6-7]  bytes_per_sector   (uint16_t, always 512)
+```
+
+The kernel passes `CX` (the buffer near-pointer) from caller DS. The handler
+fills the buffer using `write_far_b`/`write_far_w` to write into caller DS.
+This avoids the SS!=DS trap — no stack-allocated receive buffer needed.
+
+Used by `apps/df.c` to report total/used/free KB. Because `bytes_per_sector`
+is always 512 on this platform, `df.c` computes `KB = (clusters * spc) >> 1`
+to stay in 16-bit arithmetic (no `__U4M` runtime needed).
 
 ### Process (0x40-0x4F)
 
@@ -190,7 +228,20 @@ the file is properly flushed and the directory entry size is updated.
 |---|------|------|---------|
 | 0x50 | `ALLOC` | - | - |
 | 0x51 | `FREE` | - | - |
-| 0x52 | `MEM_INFO` | - | - |
+| 0x52 | `MEM_INFO` | `CX` = ptr to 4-byte buffer | 0 = OK |
+
+#### `SYSCALL_MEM_INFO` (0x52)
+
+Returns total and used RAM in paragraphs. Buffer layout:
+
+```
+[0-1]  total_paras  (uint16_t) — from BDA 0x0040:0x0013 (KB) × 64
+[2-3]  used_paras   (uint16_t) — from get_next_seg() (next allocatable segment)
+```
+
+`get_next_seg()` returns the next free segment after all currently loaded
+`.COM` processes. `apps/free.c` converts to KB via `paras >> 6` (16 bytes/para,
+1024 bytes/KB → divide by 64).
 
 ### Misc (0x80-0x8F)
 

@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import re
 import shutil
 import struct
 import subprocess
@@ -202,12 +203,37 @@ def link_kernel(obj_dir: Path, out_dir: Path) -> bool:
         return False
 
 
+def _parse_main_addr(map_path: Path) -> "int | None":
+    """Parse a wlink map file; return the address of _main_ or None if not found.
+
+    wlink emits lines like:
+        00000100*      _main_
+    in the Memory Map section.  The 8-digit hex address precedes the symbol
+    name; '*' and '+' markers (unreferenced / local) may appear between them.
+    OpenWatcom mangles C names by appending an underscore (_main → _main_).
+    """
+    pattern = re.compile(r'^([0-9a-fA-F]{8})[*+]?\s+_main_\s*$')
+    try:
+        with open(map_path, "r") as fh:
+            for line in fh:
+                m = pattern.match(line.strip())
+                if m:
+                    return int(m.group(1), 16)
+    except OSError:
+        pass
+    return None
+
+
 def link_app(obj_dir: Path, out_dir: Path, app_name: str,
              lib_objs: "list[Path] | None" = None) -> bool:
     """Compile and link a .COM application (C source or WASM assembly).
     Tries .c first, falls back to .asm.
     lib_objs: optional list of pre-compiled library .obj files appended AFTER
-    the app's own object (entry-point ordering rule: app's _main must be first)."""
+    the app's own object (entry-point ordering rule: app's _main must be first).
+
+    After linking a C app the wlink map file is checked to verify that _main
+    is the first byte of the .COM image (address 0x100).  This guards against
+    helper functions accidentally placed before _main in the source file."""
     c_src = APPS_DIR / f"{app_name}.c"
     asm_src = APPS_DIR / f"{app_name}.asm"
 
@@ -226,15 +252,19 @@ def link_app(obj_dir: Path, out_dir: Path, app_name: str,
     app_out = out_dir / f"{app_name.upper()}.COM"
     obj = obj_dir / f"{app_name}.obj"
     temp_ld = out_dir / f"_{app_name}_link.lnk"
+    map_out = out_dir / f"_{app_name}_link.map"
+    is_c_app = c_src.exists()
+
     with open(temp_ld, "w") as f:
         f.write("format raw bin\n")
-        if c_src.exists():
+        if is_c_app:
             # C apps: ORG 0x100 so data references match load address
             f.write("option offset=0x100\n")
         else:
             # WASM apps: relative-to-zero, asm code adds 0x100 manually
             f.write("option offset=0\n")
         f.write("option quiet\n")
+        f.write(f"option map={map_out}\n")
         f.write(f"name {app_out}\n")
         f.write(f"file {obj}\n")
         # lib objects AFTER app object (entry-point ordering)
@@ -245,6 +275,23 @@ def link_app(obj_dir: Path, out_dir: Path, app_name: str,
     try:
         run([str(WLINK), f"@{temp_ld}"])
         log(f"App linked: {app_out.name} ({app_out.stat().st_size} bytes)")
+
+        # Entry-point guard: _main must be the very first byte of the .COM image.
+        if is_c_app and map_out.exists():
+            entry_addr = _parse_main_addr(map_out)
+            map_out.unlink(missing_ok=True)
+            if entry_addr is not None and entry_addr != 0x100:
+                log(
+                    f"ENTRY POINT BUG: {app_name.upper()}.COM — _main is at "
+                    f"0x{entry_addr:04x} instead of 0x0100. "
+                    f"Move _main to be the FIRST function in apps/{app_name}.c "
+                    f"(add a forward prototype for any helper called by _main).",
+                    "ERROR",
+                )
+                return False
+        elif map_out.exists():
+            map_out.unlink(missing_ok=True)
+
         return True
     except subprocess.CalledProcessError as e:
         log(f"App link failed for {app_name}: {e.stderr.strip()}", "ERROR")
@@ -252,7 +299,15 @@ def link_app(obj_dir: Path, out_dir: Path, app_name: str,
 
 
 # .COM apps placed in BIN/ on the disk image
-BIN_APPS = ("HELLO", "CAT", "LS", "UNAME", "EDIT", "NCD", "XFER")
+BIN_APPS = (
+    "HELLO", "CAT", "LS", "UNAME", "EDIT", "NCD", "XFER",
+    # File management
+    "CP", "MV", "RM", "MKDIR", "RMDIR",
+    # Text filters
+    "GREP", "HEAD", "TAIL", "SORT", "CUT", "LESS",
+    # System info
+    "FREE", "DF", "DU",
+)
 
 MEDIT_DIR = APPS_DIR / "medit"
 
@@ -430,7 +485,15 @@ def build_all() -> bool:
     lib_objs = build_libs(OBJ_DIR)
 
     # 3c. Build apps (.COM executables) — lib objects linked after app object
-    for app in ("hello", "cat", "ls", "uname", "shell"):
+    for app in (
+        "hello", "cat", "ls", "uname", "shell",
+        # File management
+        "cp", "mv", "rm", "mkdir", "rmdir",
+        # Text filters
+        "grep", "head", "tail", "sort", "cut", "less",
+        # System info
+        "free", "df", "du",
+    ):
         if not link_app(OBJ_DIR, BUILD_DIR, app, lib_objs):
             log(f"App build ({app}) skipped", "WARNING")
 
@@ -782,16 +845,21 @@ def _write_sector(image: Path, lba: int, data: bytes) -> None:
 
 
 def _read_fat(image: Path) -> bytearray:
-    """Read FAT copy 0."""
+    """Read FAT copy 0 (all _FAT_SECTORS sectors)."""
     fat_lba = _PARTITION_START + 1  # Reserved (VBR) at LBA 63, FAT0 at 64
-    return _read_sector(image, fat_lba)
+    result = bytearray()
+    for i in range(_FAT_SECTORS):
+        result += _read_sector(image, fat_lba + i)
+    return result
 
 
 def _write_fat(image: Path, fat: bytearray) -> None:
-    """Write both FAT copies."""
+    """Write both FAT copies (all _FAT_SECTORS sectors each)."""
     fat_lba = _PARTITION_START + 1
-    _write_sector(image, fat_lba, bytes(fat))
-    _write_sector(image, fat_lba + _FAT_SECTORS, bytes(fat))
+    for i in range(_FAT_SECTORS):
+        sector = fat[i * _SECTOR_SIZE:(i + 1) * _SECTOR_SIZE]
+        _write_sector(image, fat_lba + i, bytes(sector))
+        _write_sector(image, fat_lba + _FAT_SECTORS + i, bytes(sector))
 
 
 def _find_free_clusters(image: Path, count: int) -> list[int]:
@@ -966,14 +1034,28 @@ def write_file_to_subdir(image: Path, data: bytes, filename: str,
                 log(f"Wrote {filename} to subdir cluster {dir_cluster}")
                 return True
 
-        # If sector full and last entry != 0x00 (more entries possible),
-        # follow chain to next cluster
+        # If sector full, try to follow or extend the FAT chain
         if sector[15 * 32] != 0x00:
             fat = _read_fat(image)
             next_c = struct.unpack('<H', fat[cluster * 2:(cluster * 2) + 2])[0]
             if next_c >= 2 and next_c < 0xFFF8:
                 cluster = next_c
                 continue
+            # End of chain — allocate a new cluster to extend the directory
+            new_cs = _find_free_clusters(image, 1)
+            if not new_cs:
+                log(f"No free clusters to extend subdir for {filename}", "ERROR")
+                return False
+            new_c = new_cs[0]
+            # Zero the new cluster
+            new_sector_lba = first_data_sector + (new_c - 2)
+            _write_sector(image, new_sector_lba, bytes(512))
+            # Chain current cluster → new cluster → EOC
+            struct.pack_into('<H', fat, cluster * 2, new_c)
+            struct.pack_into('<H', fat, new_c * 2, 0xFFF8)
+            _write_fat(image, fat)
+            cluster = new_c
+            continue
         break
 
     log(f"Subdirectory full for {filename}", "ERROR")
@@ -1271,6 +1353,11 @@ def main() -> int:
     readme_data += b"OpenWatcom C kernel with FAT16 filesystem\r\n"
     readme_data += b"\r\n"
     readme_data += b"Apps in BIN/: HELLO, CAT, LS, UNAME, EDIT, NCD, XFER\r\n"
+    readme_data += b"            CP, MV, RM, MKDIR, RMDIR\r\n"
+    readme_data += b"            GREP, HEAD, TAIL, SORT, CUT, LESS\r\n"
+    readme_data += b"            FREE, DF, DU\r\n"
+    readme_data += b"Pipes:    ls | grep txt | sort\r\n"
+    readme_data += b"Redirect: ls > files.txt\r\n"
     readme_data += b"Manual: cd DOCS  then  cat MANUAL.TXT (also NCD.TXT)\r\n"
     if write_file_to_fat16(image, readme_data, "README.TXT", first_data):
         log("README.TXT written to disk image")

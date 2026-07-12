@@ -47,9 +47,13 @@ void vid_fill(int row, int col, int n, uint8_t ch, uint8_t attr);
 void vid_flush(void);                                /* write dirty rows to VGA VRAM */
 void vid_cursor(int row, int col);                   /* show cursor at position */
 void vid_cursor_hide(void);                          /* hide via CRTC register 0x3D4/0x3D5 */
+void vid_dirty_all(void);  /* mark every row dirty; next flush repaints whole screen */
 ```
 
 `vid_init(void)` — no `fastmode` parameter (medit's original unused parameter was dropped).
+
+`vid_dirty_all()` — call after a child program returns (it wrote directly to VGA, staling
+the shadow buffer). Ensures the next `vid_flush()` overwrites every row.
 
 ## Keyboard — `hdk_keys.h` / `kbd.c`
 
@@ -123,11 +127,17 @@ Set at app startup. Selects button labels (English or Norwegian).
 ```c
 int dlg_msgbox(const char *text, int buttons);      /* returns HDK_* */
 int dlg_input(const char *title, char *buf, int max); /* returns HDK_OK / HDK_CANCEL */
+void dlg_progress(const char *title, uint16_t cur, uint16_t total, const char *name);
 void dlg_draw_frame(int top, int left, int h, int w);
 void dlg_draw_button(int row, int col, const char *label, int selected);
 void dlg_field_draw(int row, int col, int w, HdkField *f);
 int  dlg_field_key(HdkField *f, unsigned k);        /* returns 1 if key consumed */
 ```
+
+`dlg_progress()` — non-blocking progress box (draws + flushes, reads no keys).
+Shows: title in the header, "cur / total  NN%" with a proportional block bar,
+and the item name middle-truncated to fit the box width (48 chars inner).
+Call before each item; the next `panel_refresh` + `full_render` covers it.
 
 `HdkField` — text input state:
 ```c
@@ -175,6 +185,17 @@ void fat_format_name12(const char *name, char *out);               /* "FILE     
 void fat_format_date(uint16_t date, char *out);                    /* "YYYY.MM.DD" */
 void fat_format_time(uint16_t date, uint16_t time, char *out);     /* "HH:MM" */
 int  fat_is_dot_entry(const fat_dirent_t *ent);                    /* 1 = "." or ".." */
+```
+
+### Text formatting helpers
+```c
+/* Middle-truncate src to exactly width chars: "very/long/path" -> "very/...path".
+ * out must be width+1 bytes. */
+void fmt_ellipsis_mid(char *out, const char *src, uint16_t width);
+
+/* Right-align val in a field of width ASCII chars, padded with spaces.
+ * out must be width+1 bytes. */
+void fmt_uint_field(char *out, uint32_t val, uint16_t width);
 ```
 
 ## Migration notes

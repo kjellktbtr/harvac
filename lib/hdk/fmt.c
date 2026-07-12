@@ -94,3 +94,47 @@ int fat_is_dot_entry(const fat_dirent_t *ent)
         return 1;
     return 0;
 }
+
+/* Middle-truncate src to width chars: "very/long/path" -> "very/...path"
+ * out must be at least width+1 bytes. */
+void fmt_ellipsis_mid(char *out, const char *src, uint16_t width)
+{
+    uint16_t slen = (uint16_t)strlen(src);
+    uint16_t i;
+
+    if (slen <= width) {
+        for (i = 0; i < slen; i++) out[i] = src[i];
+        out[slen] = '\0';
+        return;
+    }
+    if (width <= 3) {
+        /* Degenerate: just dots */
+        for (i = 0; i < width; i++) out[i] = '.';
+        out[width] = '\0';
+        return;
+    }
+    {
+        uint16_t head = (uint16_t)((width - 3) / 2);
+        uint16_t tail = (uint16_t)(width - 3 - head);
+        uint16_t tail_start = slen - tail;
+        for (i = 0; i < head; i++) out[i] = src[i];
+        out[head]     = '.';
+        out[head + 1] = '.';
+        out[head + 2] = '.';
+        for (i = 0; i < tail; i++) out[head + 3 + i] = src[tail_start + i];
+        out[width] = '\0';
+    }
+}
+
+/* Right-align val in a field of width ASCII chars; pad with spaces. */
+void fmt_uint_field(char *out, uint32_t val, uint16_t width)
+{
+    char tmp[12];
+    uint16_t len, pad, i;
+    u32toa(val, tmp);
+    len = (uint16_t)strlen(tmp);
+    pad = (len < width) ? (uint16_t)(width - len) : 0;
+    for (i = 0; i < pad; i++) out[i] = ' ';
+    for (i = 0; i < len && pad + i < width; i++) out[pad + i] = tmp[i];
+    out[width] = '\0';
+}

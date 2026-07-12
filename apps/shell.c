@@ -21,6 +21,8 @@
 #include "string.h"
 #include "fcntl.h"
 #include "unistd.h"
+#include "dirent.h"
+#include "fnmatch.h"
 
 /* Line buffer size */
 #define LINE_MAX    128
@@ -28,11 +30,20 @@
 /* Sentinel for raw kernel redirect handle (NO_HANDLE = none active) */
 #define NO_HANDLE  0xFFFFu
 
+/* Glob expansion buffer (reused every command execution) */
+#define GLOB_BUF_SIZE  512
+/* PSP command tail spans 0x82..0xFF — 125 usable bytes before the entry point.
+ * Stop adding glob tokens once this limit is reached (whole-token boundary)
+ * so the kernel's arg-copy never corrupts the child's code at 0x100. */
+#define PSP_ARG_MAX    124
+static char _glob_buf[GLOB_BUF_SIZE];
+
 /* Forward declarations */
-static int  read_bat_line(int fd, char *buf, uint16_t maxlen);
-static void cmd_help(void);
-static void cmd_cd(const char *arg);
-static void cmd_pwd(void);
+static int         read_bat_line(int fd, char *buf, uint16_t maxlen);
+static void        cmd_help(void);
+static void        cmd_cd(const char *arg);
+static void        cmd_pwd(void);
+static const char *glob_expand_args(const char *args);
 
 /* _main: entry point (__far so retf returns to kernel) */
 void __far _main(void)
@@ -120,6 +131,141 @@ void __far _main(void)
 
         if (line[i] == '\0')
             continue;
+
+        /* ─── Pipe detection: "cmd1 | cmd2 [| cmd3] [> file]" ─── */
+        {
+            /* Temp file paths for up to 3 pipe stages */
+            static char ptmp0[] = "/TMP/PIPE0";
+            static char ptmp1[] = "/TMP/PIPE1";
+            static char ptmp2[] = "/TMP/PIPE2";
+            char *ptmp[3];
+            char *stg[4];       /* stage start pointers into line[] */
+            int   ns;           /* number of stages */
+            uint16_t pk;
+            int has_pipe;
+
+            ptmp[0] = ptmp0;
+            ptmp[1] = ptmp1;
+            ptmp[2] = ptmp2;
+
+            /* Quick check for '|' */
+            has_pipe = 0;
+            for (pk = i; line[pk]; pk++) {
+                if (line[pk] == '|') { has_pipe = 1; break; }
+            }
+
+            if (has_pipe) {
+                /* Split line on '|' */
+                ns = 0;
+                stg[ns++] = line + i;
+                for (pk = i; line[pk]; pk++) {
+                    if (line[pk] == '|') {
+                        uint16_t e = pk;
+                        while (e > i && line[e - 1] == ' ') e--;
+                        line[e] = '\0';
+                        line[pk] = '\0';
+                        for (pk++; line[pk] == ' '; pk++) ;
+                        if (ns < 4 && line[pk])
+                            stg[ns++] = line + pk;
+                        pk--;
+                    }
+                }
+
+                if (ns > 1) {
+                    int ps;
+                    uint16_t wh, srh, rdh;
+                    static char empty_str[] = "";
+
+                    for (ps = 0; ps < ns; ps++) {
+                        char *sl = stg[ps];
+                        uint16_t ci, cj, cn, ki;
+                        char scmd[16];
+                        char *sa;
+
+                        /* Parse command word from stage */
+                        ci = 0;
+                        while (sl[ci] == ' ') ci++;
+                        for (cj = ci; sl[cj] && sl[cj] != ' '; cj++) ;
+                        cn = cj - ci;
+                        if (cn > 15) cn = 15;
+                        for (ki = 0; ki < cn; ki++) scmd[ki] = sl[ci + ki];
+                        scmd[cn] = '\0';
+
+                        /* Skip spaces to args */
+                        while (sl[cj] == ' ') cj++;
+                        sa = sl[cj] ? sl + cj : empty_str;
+
+                        /* Handle '>' redirect on the last stage */
+                        rdh = NO_HANDLE;
+                        if (ps == ns - 1) {
+                            char *gp = sa;
+                            while (*gp && *gp != '>') gp++;
+                            if (*gp == '>') {
+                                char *gt = gp;
+                                char *rfn;
+                                while (gt > sa && gt[-1] == ' ') gt--;
+                                *gt = '\0';
+                                sa = (sa == gt) ? empty_str : sa;
+                                gp++;
+                                while (*gp == ' ') gp++;
+                                rfn = gp;
+                                if (*rfn) {
+                                    char *rend = rfn;
+                                    while (*rend && *rend != ' ') rend++;
+                                    *rend = '\0';
+                                    syscall_int40(SYSCALL_DELETE, 0, (uint16_t)rfn, 0, 0, 0, 0);
+                                    rdh = syscall_int40(SYSCALL_CREATE, 0, (uint16_t)rfn, 0, 0, 0, 0);
+                                    if (rdh < 16)
+                                        syscall_int40(SYSCALL_SET_STDOUT, 0, rdh, 0, 0, 0, 0);
+                                }
+                            }
+                        }
+
+                        /* Non-last stage: stdout → temp pipe file */
+                        wh = NO_HANDLE;
+                        if (ps < ns - 1) {
+                            syscall_int40(SYSCALL_DELETE, 0, (uint16_t)ptmp[ps], 0, 0, 0, 0);
+                            wh = syscall_int40(SYSCALL_CREATE, 0, (uint16_t)ptmp[ps], 0, 0, 0, 0);
+                            if (wh < 16)
+                                syscall_int40(SYSCALL_SET_STDOUT, 0, wh, 0, 0, 0, 0);
+                        }
+
+                        /* Non-first stage: stdin ← previous temp pipe file */
+                        srh = NO_HANDLE;
+                        if (ps > 0) {
+                            srh = syscall_int40(SYSCALL_OPEN, 0, (uint16_t)ptmp[ps - 1], 0, 0, 0, 0);
+                            if (srh < 16)
+                                syscall_int40(SYSCALL_SET_STDIN, 0, srh, 0, 0, 0, 0);
+                        }
+
+                        /* Execute stage as external command (with glob expansion) */
+                        if (scmd[0])
+                            syscall_int40(SYSCALL_EXEC, 0,
+                                          (uint16_t)scmd,
+                                          (uint16_t)glob_expand_args(sa),
+                                          0, 0, 0);
+
+                        /* Clear and close stdout redirect */
+                        if (wh < 16) {
+                            syscall_int40(SYSCALL_SET_STDOUT, 0, (uint16_t)NO_HANDLE, 0, 0, 0, 0);
+                            syscall_int40(SYSCALL_CLOSE, 0, wh, 0, 0, 0, 0);
+                        }
+                        if (rdh < 16) {
+                            syscall_int40(SYSCALL_SET_STDOUT, 0, (uint16_t)NO_HANDLE, 0, 0, 0, 0);
+                            syscall_int40(SYSCALL_CLOSE, 0, rdh, 0, 0, 0, 0);
+                        }
+
+                        /* Clear stdin redirect and delete consumed temp file */
+                        if (srh < 16) {
+                            syscall_int40(SYSCALL_SET_STDIN, 0, (uint16_t)NO_HANDLE, 0, 0, 0, 0);
+                            syscall_int40(SYSCALL_CLOSE, 0, srh, 0, 0, 0, 0);
+                            syscall_int40(SYSCALL_DELETE, 0, (uint16_t)ptmp[ps - 1], 0, 0, 0, 0);
+                        }
+                    }
+                    goto after_exec;
+                }
+            }
+        }   /* end pipe detection */
 
         /* Scan for '>' redirect operator */
         for (k = i; line[k] && line[k] != '>'; k++)
@@ -214,10 +360,11 @@ void __far _main(void)
                     fputs("\r\n");
                 }
             } else {
-                /* Try exec as .COM */
+                /* Try exec as .COM (with glob expansion on args) */
                 ret = syscall_int40(SYSCALL_EXEC, 0,
                                     (uint16_t)(line + i),
-                                    (uint16_t)(line + j), 0, 0, 0);
+                                    (uint16_t)glob_expand_args(line + j),
+                                    0, 0, 0);
                 if (ret != 0) {
                     /* EXEC failed: if no extension in command, try .BAT */
                     if (strchr(line + i, '.') == (char *)0) {
@@ -265,6 +412,87 @@ void __far _main(void)
     }
 
     _exit(0);
+}
+
+/* glob_expand_args: expand glob patterns (* and ?) in an args string.
+ * Tokens that contain no glob chars are passed through unchanged.
+ * Tokens with * or ? are matched against entries in the current directory;
+ * matches are substituted space-separated. If no entry matches, the literal
+ * token is kept (nullglob-off semantics).
+ * Tokens containing '/' are never expanded (only bare names are matched).
+ * Returns pointer to the static _glob_buf, or to the original args if no
+ * expansion was needed. */
+static const char *glob_expand_args(const char *args)
+{
+    const char *p;
+    uint16_t has;
+    uint16_t oi;
+    char tok[NAME_MAX + 2];  /* one FAT16 name + NUL */
+    uint16_t ti;
+    DIR *dp;
+    struct dirent *de;
+    uint16_t found;
+    uint16_t nl;
+
+    /* Quick scan: if no glob chars at all, return as-is */
+    has = 0;
+    for (p = args; *p; p++) {
+        if (*p == '*' || *p == '?') { has = 1; break; }
+    }
+    if (!has) return args;
+
+    oi = 0;
+    _glob_buf[0] = '\0';
+    p = args;
+
+    while (*p) {
+        /* Skip leading spaces */
+        while (*p == ' ') p++;
+        if (!*p) break;
+
+        /* Collect one token */
+        ti = 0;
+        while (*p && *p != ' ' && ti < sizeof(tok) - 1)
+            tok[ti++] = *p++;
+        tok[ti] = '\0';
+        if (ti == 0) continue;
+
+        /* Expand only if token has glob chars AND no path separator */
+        if (has_glob(tok) && strchr(tok, '/') == (char *)0) {
+            dp = opendir(".");
+            found = 0;
+            if (dp) {
+                while ((de = readdir(dp)) != NULL) {
+                    if (!fnmatch(tok, de->d_name)) continue;
+                    nl = (uint16_t)strlen(de->d_name);
+                    if (oi + nl + 2 < GLOB_BUF_SIZE && oi + nl + 1 < PSP_ARG_MAX) {
+                        if (oi > 0) _glob_buf[oi++] = ' ';
+                        strcpy(_glob_buf + oi, de->d_name);
+                        oi += nl;
+                        found = 1;
+                    }
+                }
+                closedir(dp);
+            }
+            if (!found) {
+                /* No match: keep literal token */
+                if (oi + ti + 2 < GLOB_BUF_SIZE && oi + ti + 1 < PSP_ARG_MAX) {
+                    if (oi > 0) _glob_buf[oi++] = ' ';
+                    strcpy(_glob_buf + oi, tok);
+                    oi += ti;
+                }
+            }
+        } else {
+            /* No glob: pass through */
+            if (oi + ti + 2 < GLOB_BUF_SIZE && oi + ti + 1 < PSP_ARG_MAX) {
+                if (oi > 0) _glob_buf[oi++] = ' ';
+                strcpy(_glob_buf + oi, tok);
+                oi += ti;
+            }
+        }
+    }
+    _glob_buf[oi] = '\0';
+    return _glob_buf;
 }
 
 /* read_bat_line: read next line from batch file fd into buf.

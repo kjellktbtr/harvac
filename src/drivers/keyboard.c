@@ -113,6 +113,14 @@ static void process_scancode(uint8_t sc)
         return;
     }
 
+    /* Gray/extended navigation keys emit E0 2A (make) / E0 AA (break) as
+     * "fake shift" sequences around the real key code.  Discard them so
+     * shift_pressed is not spuriously set during, e.g., a left/right arrow. */
+    if (ext_prefix && (sc == 0x2A || sc == 0x36 || sc == 0xAA || sc == 0xB6)) {
+        ext_prefix = 0;
+        return;
+    }
+
     /* Modifier make/break codes */
     if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; ext_prefix = 0; return; }
     if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; ext_prefix = 0; return; }

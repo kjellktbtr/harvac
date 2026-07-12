@@ -5,7 +5,7 @@ sources:
   - All source files under src/
 related: []
 created: 2025-07-05
-updated: 2026-07-11
+updated: 2026-07-12T16:30
 confidence: high
 ---
 
@@ -21,6 +21,7 @@ Master catalog of all wiki pages for the Harvac project (HarvaOS ported to C).
 | [[toolchain]] | entity | OpenWatcom C toolchain setup and usage |
 | [[architecture]] | code-map | System architecture and memory layout |
 | [[boot-chain]] | code-map | MBR/VBR boot chain, debug markers, geometry handling, gdb recipes |
+| [[shared-libc]] | comparison | Static vs shared libc: Option A (syscalls), B (call table), C (dead-strip) — investigation only |
 
 ## Implementation Status
 
@@ -29,7 +30,7 @@ Master catalog of all wiki pages for the Harvac project (HarvaOS ported to C).
 | [[bootloader]] | Phase 0 | Complete - MBR, VBR, loads KERNEL.COM from FAT16 |
 | [[kernel-core]] | Phase 0 | Complete - entry.asm sets CS/DS/SS:SP, calls kmain() in C |
 | [[video-driver]] | Phase 3 | Complete - VGA text mode 80x25, cursor, scrolling, attributes |
-| [[keyboard-driver]] | Phase 3 | Complete - IRQ1-driven (XT+AT compatible), scancode set 1, ring buffer, shift/caps |
+| [[keyboard-driver]] | Phase 3 | Complete - IRQ1-driven (XT+AT compatible), scancode set 1, ring buffer, shift/caps; fake-shift guard for gray keys |
 | [[serial-driver]] | Phase 3 | Complete - COM1 115200 8N1 driver |
 | [[syscall-dispatch]] | Phase 2 | Complete - INT 0x40 handler, all syscalls wired |
 | [[disk-driver]] | Phase 4 | Complete - INT 13h LBA read/write with retry logic |
@@ -44,6 +45,7 @@ Master catalog of all wiki pages for the Harvac project (HarvaOS ported to C).
 | [[ncd]] | Phase 11 | Complete — NCD.COM dual-pane file manager with far-segment memory model |
 | [[posix-api]] | Phase 12 | Complete — POSIX-like libc (open/read/write/lseek/dirent/stat/stdio) in lib/posix/ |
 | [[harva-dev-kit]] | Phase 12 | Complete — HDK TUI library (video/keyboard/dialog/far/fmt) in lib/hdk/ |
+| [[shell-commands]] | Phase 13 | Complete — Full command suite (cp/mv/rm/mkdir/rmdir, text filters, sysadmin) + pipes (`\|`) |
 
 ## Key Source Files
 

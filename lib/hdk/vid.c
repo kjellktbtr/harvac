@@ -83,6 +83,13 @@ void vid_cursor(int row, int col)
                   0, 0, 0, 0);
 }
 
+void vid_dirty_all(void)
+{
+    int r;
+    for (r = 0; r < ROWS; r++)
+        dirty[r] = 1;
+}
+
 void vid_cursor_hide(void)
 {
     if (!curhidden) {

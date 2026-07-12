@@ -57,4 +57,9 @@ int    chdir(const char *path);
 char  *getcwd(char *buf, uint16_t size);
 int    rename(const char *oldpath, const char *newpath);
 
+/* Set FAT16 modification date/time on a file by path.
+ * date and time are FAT16-packed fields (same encoding as struct stat
+ * st_mdate / st_mtime).  Returns 0 on success, -1 on error. */
+int    utime(const char *path, uint16_t date, uint16_t time);
+
 #endif /* UNISTD_H */

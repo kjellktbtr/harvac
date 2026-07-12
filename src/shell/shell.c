@@ -22,9 +22,10 @@ void boot_shell(void)
     fat16_fs_t *root_fs = syscall_get_root_fs();
     uint8_t shell_name[12] = "SHELL   COM";
 
-    /* Finalize any stdout redirect from a previous exec'd .COM.
+    /* Finalize any stdout/stdin redirect from a previous exec'd .COM.
      * Must run before exec_com (which far-jumps and never returns). */
     syscall_finalize_redirect();
+    syscall_finalize_stdin();
 
     /* Initialize VFS before booting user-space shell, since
      * kernel_shell() won't be reached when exec_com succeeds. */

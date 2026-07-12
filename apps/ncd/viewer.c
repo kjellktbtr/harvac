@@ -7,7 +7,8 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
-#include "fs.h"
+#include "fcntl.h"
+#include "unistd.h"
 #include "viewer.h"
 
 /* Number of visible lines in the viewer content area */
@@ -18,7 +19,7 @@ static u16 viewer_buf_len;
 static u16 viewer_scroll;
 static char viewer_filename[NAME_MAX];
 
-/* 512-byte bounce buffer for ncd_read; same size as io_buf in fs.c */
+/* 512-byte bounce buffer for reading; matches sector size */
 static u8 bounce[512];
 
 /* Count total lines in the far buffer */
@@ -129,24 +130,28 @@ void viewer_open(const char *path)
     }
 
     /* Open file */
-    fh = ncd_open(path);
-    if (fh >= 16) {
-        /* Could not open - show error */
-        vid_fill(ROWS - 1, 0, COLS, ' ', A_STATUS);
-        vid_puts(ROWS - 1, 1, "Cannot open file", A_STATUS);
-        vid_flush();
-        return;
-    }
+    {
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            /* Could not open - show error */
+            vid_fill(ROWS - 1, 0, COLS, ' ', A_STATUS);
+            vid_puts(ROWS - 1, 1, "Cannot open file", A_STATUS);
+            vid_flush();
+            return;
+        }
 
-    /* Read file into far buffer via bounce buffer */
-    while (total < VIEWER_BUF_SIZE - 1) {
-        chunk = VIEWER_BUF_SIZE - 1 - total;
-        if (chunk > sizeof(bounce)) chunk = sizeof(bounce);
-        nr = ncd_read(fh, bounce, chunk);
-        if (nr == 0) break;
-        far_copy((u8 __far *)MK_FP(viewer_seg, total),
-                 (const u8 __far *)bounce, nr);
-        total += nr;
+        /* Read file into far buffer via bounce buffer */
+        while (total < VIEWER_BUF_SIZE - 1) {
+            int nr;
+            chunk = VIEWER_BUF_SIZE - 1 - total;
+            if (chunk > (u16)sizeof(bounce)) chunk = (u16)sizeof(bounce);
+            nr = read(fd, bounce, chunk);
+            if (nr <= 0) break;
+            far_copy((u8 __far *)MK_FP(viewer_seg, total),
+                     (const u8 __far *)bounce, (u16)nr);
+            total += (u16)nr;
+        }
+        close(fd);
     }
     /* Null-terminate in far segment */
     {
@@ -155,8 +160,6 @@ void viewer_open(const char *path)
     }
     viewer_buf_len = total;
     viewer_scroll = 0;
-
-    ncd_close(fh);
 
     total_lines = count_lines();
 

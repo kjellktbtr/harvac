@@ -114,11 +114,18 @@ off_t lseek(int fd, off_t offset, int whence)
 }
 
 /* ─── isatty() ─── */
+/* For stdout/stderr (console_no 1/2) always returns 1.
+ * For stdin (console_no 0) the kernel may have redirected it to a pipe file;
+ * delegate to SYSCALL_ISATTY which checks g_stdin.  This restores the
+ * behaviour that `lib/posix/stdio.c` glfd_getc relies on for buffering. */
 int isatty(int fd)
 {
     libc_fd_t *e = _fd_get(fd);
     if (!e) return 0;
-    return (e->kind == FK_CONSOLE) ? 1 : 0;
+    if (e->kind != FK_CONSOLE) return 0;
+    if (e->console_no == 0)
+        return (int)(uint16_t)syscall_int40(SYSCALL_ISATTY, 0, 0, 0, 0, 0, 0);
+    return 1;
 }
 
 /* ─── _exit() ─── */
@@ -192,6 +199,16 @@ int rename(const char *oldpath, const char *newpath)
     uint16_t r = (uint16_t)syscall_int40(SYSCALL_RENAME, 0, 0, 0, 0,
                                          (uint16_t)oldpath,
                                          (uint16_t)newpath);
+    if (r != 0) return set_errno(r);
+    return 0;
+}
+
+/* ─── utime() ─── */
+/* SI = path, CX = FAT16 date, DX = FAT16 time (see SYSCALL_UTIME) */
+int utime(const char *path, uint16_t date, uint16_t time)
+{
+    uint16_t r = (uint16_t)syscall_int40(SYSCALL_UTIME, 0, 0,
+                                         date, time, (uint16_t)path, 0);
     if (r != 0) return set_errno(r);
     return 0;
 }

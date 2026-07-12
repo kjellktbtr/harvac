@@ -6,7 +6,8 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
-#include "fs.h"
+#include "unistd.h"
+#include "dirent.h"
 #include "panel.h"
 
 panel_t panel_left;
@@ -94,44 +95,44 @@ static void panel_clamp_scroll(panel_t *p);
 void panel_sync_cwd(panel_t *p)
 {
     if (p->cwd[0] != '\0')
-        ncd_chdir(p->cwd);
+        chdir(p->cwd);
 }
 
 void panel_refresh(panel_t *p)
 {
-    ncd_dir_t dir;
-    ncd_dirent_t ent;
+    DIR *dp;
+    struct dirent *de;
     panel_entry_t entry;
 
     /* Re-enter this panel's directory, then read back the (possibly
      * corrected) canonical CWD */
     panel_sync_cwd(p);
-    ncd_getcwd(p->cwd, sizeof(p->cwd));
+    getcwd(p->cwd, sizeof(p->cwd));
 
     p->count = 0;
 
-    if (ncd_opendir(&dir) != 0)
+    dp = opendir(".");
+    if (!dp)
         return;
 
-    while (ncd_readdir(&dir, &ent) == 0) {
-        if (ent.name[0] == 0 || ent.name[0] == 0xE5)
-            continue;
-        if (ncd_is_dot_entry(&ent))
+    while ((de = readdir(dp)) != NULL) {
+        /* Skip ".." (POSIX readdir already skips ".") */
+        if (de->d_name[0] == '.' && de->d_name[1] == '.' && de->d_name[2] == '\0')
             continue;
         if (p->count >= MAX_ENTRIES)
             break;
 
-        ncd_format_name(&ent, entry.name, NAME_MAX);
-        entry.is_dir = (ent.attrs & DIR_ATTR_DIRECTORY) ? 1 : 0;
-        entry.size = ent.file_size;
-        entry.date = ent.date;
-        entry.time = ent.time;
+        strcpy(entry.name, de->d_name);
+        entry.is_dir   = (de->d_attr & DIR_ATTR_DIRECTORY) ? 1 : 0;
+        entry.size     = de->d_size;
+        entry.date     = de->d_date;
+        entry.time     = de->d_time;
         entry.selected = 0;
         panel_entry_set(p, p->count, &entry);
         p->count++;
     }
 
-    ncd_closedir(&dir);
+    closedir(dp);
     panel_sort(p);
 
     /* Clamp selection and scroll */
@@ -264,8 +265,8 @@ int panel_enter_dir(panel_t *p)
         panel_entry_get(p, p->sel, &e);
         if (e.is_dir) {
             panel_sync_cwd(p);
-            ncd_chdir(e.name);
-            ncd_getcwd(p->cwd, sizeof(p->cwd));
+            chdir(e.name);
+            getcwd(p->cwd, sizeof(p->cwd));
             p->sel = 0;
             p->scroll = 0;
             panel_refresh(p);
@@ -279,7 +280,7 @@ void panel_parent_dir(panel_t *p)
 {
     char cwd[PATH_MAX];
     panel_sync_cwd(p);
-    ncd_getcwd(cwd, sizeof(cwd));
+    getcwd(cwd, sizeof(cwd));
 
     /* If not at root, go up one level */
     if (cwd[0] == '/' && cwd[1] != '\0') {
@@ -288,10 +289,15 @@ void panel_parent_dir(panel_t *p)
         while (i > 0 && cwd[i] != '/') i--;
         if (i > 0) {
             cwd[i] = '\0';
-            ncd_chdir(cwd);
+            chdir(cwd);
         } else {
-            ncd_chdir("/");
+            chdir("/");
         }
+        /* Update panel CWD so panel_refresh/panel_sync_cwd targets the new dir,
+         * not the old one.  Mirrors panel_enter_dir() which does the same. */
+        getcwd(p->cwd, sizeof(p->cwd));
+        p->sel = 0;
+        p->scroll = 0;
     }
     panel_refresh(p);
 }
@@ -390,7 +396,7 @@ void panel_render(panel_t *p, int pane_id)
         vid_putat(r, left_col + P_SEP4, '|', attr);
 
         /* Name column: "NNNNNNNN EXT" */
-        ncd_format_name12(e.name, tmp);
+        fat_format_name12(e.name, tmp);
         vid_puts(r, left_col + P_NAME, tmp, name_attr);
 
         /* Size column (right-aligned 5) */
@@ -402,9 +408,9 @@ void panel_render(panel_t *p, int pane_id)
         }
 
         /* Date / time columns */
-        ncd_format_date(e.date, tmp);
+        fat_format_date(e.date, tmp);
         vid_puts(r, left_col + P_DATE, tmp, attr);
-        ncd_format_time(e.date, e.time, tmp);
+        fat_format_time(e.date, e.time, tmp);
         vid_puts(r, left_col + P_TIME, tmp, attr);
     }
 }

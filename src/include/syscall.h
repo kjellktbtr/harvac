@@ -13,6 +13,9 @@ fat16_fs_t *syscall_get_root_fs(void);
 /* Close any active stdout redirect; called by boot_shell on exec re-entry */
 void syscall_finalize_redirect(void);
 
+/* Close any active stdin redirect; called by boot_shell on exec re-entry */
+void syscall_finalize_stdin(void);
+
 /* Dispatch a syscall. Called from int40_entry in syscall.asm */
 uint16_t syscall_handler_c(uint16_t ax, uint16_t bx, uint16_t cx,
                             uint16_t dx, uint16_t si, uint16_t di,

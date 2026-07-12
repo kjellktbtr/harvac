@@ -1,5 +1,31 @@
 # Operation Log
 
+2026-07-12 — **Three interactive bug fixes (du *, ls|less, NCD parent-nav).**
+- **PSP arg overflow (du * hangs):** `SYSCALL_EXEC` in `src/kernel/syscalls.c` copied the arg string with a `k > 127` guard; at index 127 the NUL terminator landed at `child_seg:0x0101`, overwriting the child entry point at `0x0100`. Changed guard to `k >= 125` so the last NUL is at ≤`0x00FF`. Also added `PSP_ARG_MAX = 124` in `apps/shell.c` `glob_expand_args`: stops adding tokens at a whole-token boundary once the accumulated string would overflow the 125-byte PSP tail, so the user sees a (silently) truncated list rather than a crash.
+- **ls|less prints usage (isatty regression):** Session-2 removed `isatty()` from `lib/posix/stdio.c` to fix a redefinition, leaving only the fd-table version in `unistd.c` which always returned 1 for fd 0. Fixed: `isatty()` now consults `SYSCALL_ISATTY` for console_no 0 (stdin) so it correctly returns 0 when stdin is a pipe.
+- **NCD parent-dir navigation (left/BS): stale p->cwd:** `panel_parent_dir()` chdir'd to the parent but never updated `p->cwd`, so the subsequent `panel_refresh()` → `panel_sync_cwd()` restored the old directory. Fixed by calling `getcwd(p->cwd, …)` and resetting `sel/scroll` after `chdir()`, matching what `panel_enter_dir()` does.
+
+
+
+2026-07-12 — **Session 2: bug fixes, new features, POSIX migration, shared-libc design.**
+- `cp`: directory guard (`cp: -r not specified; omitting directory '…'` without `-r`); Unix into-dir semantics with `-r` (`copy_tree` called with `dst/basename(src)` when dst is an existing dir).
+- `ls`: optional PATH argument via getcwd/chdir/restore idiom (no kernel change).
+- `du`: multi-arg loop — each non-option arg printed separately; explicit `..` skip in `du_dir`.
+- `less`: migrated from raw `SYSCALL_READ_CHAR` to `kbd_get()` (HDK); key constants changed to `K_*`.
+- Shell glob expansion: `*`/`?` tokens expanded before exec in `apps/shell.c` using `opendir`/`readdir`/`fnmatch`. New `lib/posix/fnmatch.c` + `lib/include/fnmatch.h` (case-insensitive backtracking star/np matcher + `has_glob` helper). Tokens with `/` are not expanded; no-match tokens kept literal.
+- `utime()` POSIX wrapper added to `lib/posix/unistd.c` + `lib/include/unistd.h` (wraps `SYSCALL_UTIME` 0x1A). `lib/posix/fileops.c` now uses it; raw `SYSCALL_UTIME` call removed.
+- NCD POSIX migration: `fs.c/h` reduced to two thin wrappers; `panel.c`, `viewer.c`, `main.c` migrated from `ncd_*` + raw syscalls to `lib/posix/` wrappers (`open/read/close/opendir/readdir/closedir/chdir/getcwd/mkdir/rmdir/unlink/rename/stat/copy_tree/remove_tree`). Two intentional raw calls remain: `SYSCALL_CLEAR_SCREEN`, `SYSCALL_WRITE_VGA`.
+- `isatty()` deduplication: removed from `lib/posix/stdio.c` (kept only in `lib/posix/unistd.c` which uses the fd table).
+- Added `docs/wiki/shared-libc.md`: design comparison of three static-vs-shared-libc options (Option A: syscall resident, B: LIBC.COM call table, C: dead-strip static link). Recommendation: Option C (one-function-per-file split) deferred until disk/RAM becomes a constraint.
+
+
+
+2026-07-12 — **App entry-point fixes + piped stdin buffering:** 8 broken apps (cat/du/less/grep/head/cut/tail/sort) had helper functions defined before `_main`, so the `.COM` entry at `0x100` executed the helper with garbage args → machine reset. Fixed by reordering `_main` first with forward prototypes. Also fixed `glfd_getc` (lib/posix/stdio.c) to buffer piped stdin in 512-byte chunks (was 1 byte/sector-read, making `ls|grep` very slow). Added build-time entry-point guard in `build.py` (`_parse_main_addr` via wlink map): now fails the build if `_main_` is not at `0x0100`.
+
+2026-07-12 — **Phase 13 complete — Full command suite + pipes:** Added 14 external `.COM` programs to `BIN/`: file-management (cp/mv/rm/mkdir/rmdir with `-r` recursive), text filters (cat/grep/head/tail/sort/cut/less), sysadmin (df/du/free). New shared SDK: `lib/posix/args.c` (argv parser), `lib/posix/fileops.c` (copy_file/copy_tree/remove_tree), `getline_fd` in stdio. Shell pipe support (`|`) via temp-file model (`/TMP/PIPEn`). New kernel syscalls: `SET_STDIN` (0x0C), `STATFS` (0x33), `MEM_INFO` (0x52) now implemented. Fixed `build.py` FAT reader to scan full 16 KB FAT (was only reading first sector = 256 clusters). Fixed `write_file_to_subdir` to auto-extend directory cluster chains. All 21 apps land in `BIN/`; `make test` 2/2 pass.
+
+2026-07-12 — **NCD polish (5 fixes):** Stale screen after child (vid_dirty_all), Ins now advances cursor, left-arrow fake-shift bug in kernel keyboard driver (ext_prefix guard), F5 copy progress bar (dlg_progress/fmt_ellipsis_mid), file date/time preservation on copy (SYSCALL_UTIME 0x1A + fat16_set_datetime_in_dir + ncd_set_time).
+
 2026-07-12 — **Phase 12 complete:** Extracted shared POSIX-like libc (lib/posix/) and Harva Development Kit (lib/hdk/). Deleted duplicate vid/kbd/far/str/dlg sources from medit and ncd. Kernel extended with WRITE_STDERR, serial device fd, lseek whence, TELL, GET_PID. All apps (hello, cat, ls, uname, shell, EDIT, NCD) build cleanly; 2/2 smoke tests pass.
 
 2025-07-05 — Bootstrapped wiki structure (CLAUDE.md, index.md, log.md)

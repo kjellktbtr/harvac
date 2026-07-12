@@ -93,6 +93,10 @@ uint16_t fat16_mount(uint8_t drive, uint32_t partition_lba, fat16_fs_t *fs);
  * FAT16_EOF_MIN..FAT16_EOF_MAX if end-of-chain, FAT16_BAD if bad. */
 uint16_t fat16_read_fat(fat16_fs_t *fs, uint16_t cluster);
 
+/* Count free clusters by scanning all FAT sectors (one disk read per sector,
+ * not per cluster). Returns the number of 0x0000 entries in clusters 2..total. */
+uint16_t fat16_count_free_clusters(fat16_fs_t *fs);
+
 /* Read one sector from the data area.
  * cluster: cluster number (2-based).
  * sector_off: offset within cluster (0 to sectors_per_cluster-1).
@@ -199,5 +203,11 @@ uint16_t fat16_rmdir_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
 uint16_t fat16_rename_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
                              const uint8_t *old_name,
                              const uint8_t *new_name);
+
+/* Set the date/time fields of a directory entry.
+ * dir_cluster 0 = root; date/time are in FAT16 packed format. */
+uint16_t fat16_set_datetime_in_dir(fat16_fs_t *fs, uint16_t dir_cluster,
+                                   const uint8_t *name83,
+                                   uint16_t date, uint16_t time);
 
 #endif /* DRIVERS_FAT16_H */

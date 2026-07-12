@@ -9,6 +9,7 @@
 #include "constants.h"
 #include "port_io.h"
 #include "string.h"
+#include "harva.h"
 #include "hdk_video.h"
 #include "hdk_keys.h"
 #include "hdk_box.h"
@@ -116,6 +117,85 @@ int dlg_field_key(HdkField *f, unsigned k)
         }
         return 0;
     }
+}
+
+/* ─── Progress box ─── */
+
+/* Width of the inner content area (box = DLG_PROG_W + 2 for borders) */
+#define DLG_PROG_W  48
+
+void dlg_progress(const char *title, uint16_t cur, uint16_t total,
+                  const char *name)
+{
+    int w = DLG_PROG_W + 2;          /* including side borders */
+    int top  = 8;
+    int left = (COLS - w) / 2;
+    int inner = DLG_PROG_W;          /* content columns */
+    uint16_t pct;
+    uint16_t bar_fill;
+    char nbuf[DLG_PROG_W + 1];
+    char line[DLG_PROG_W + 1];
+    char cur_s[8], tot_s[8];
+    int i, c;
+
+    /* ── percentage and filled bar width ──
+     * Use 16-bit arithmetic: cur<=512, inner=48, so products fit in u16.
+     * Avoids 32-bit __U4M/__U4D runtime helpers (not linked in small apps). */
+    pct      = total ? (uint16_t)((uint16_t)cur * (uint16_t)100 / (uint16_t)total) : (uint16_t)100;
+    bar_fill = total ? (uint16_t)((uint16_t)cur * (uint16_t)inner / (uint16_t)total) : (uint16_t)inner;
+    if (bar_fill > (uint16_t)inner) bar_fill = (uint16_t)inner;
+
+    dlg_draw_frame(top, left, 6, w);
+
+    /* ── title row ── */
+    {
+        int tlen = (int)strlen(title);
+        int tcol = left + 1 + (inner - tlen) / 2;
+        vid_fill(top,     left + 1, inner, BOX_H, A_DLG);  /* re-fill top bar */
+        vid_puts(top,     tcol,     title, A_DLG);
+    }
+
+    /* ── "cur / total   NN%" row ── */
+    u32toa((uint32_t)cur, cur_s);
+    u32toa((uint32_t)total, tot_s);
+    /* build: " cur / total   NN%" right-padded to inner */
+    {
+        int pos = 0;
+        int j;
+        line[pos++] = ' ';
+        for (j = 0; cur_s[j]; j++) line[pos++] = cur_s[j];
+        line[pos++] = ' '; line[pos++] = '/'; line[pos++] = ' ';
+        for (j = 0; tot_s[j]; j++) line[pos++] = tot_s[j];
+        while (pos < inner - 5) line[pos++] = ' ';
+        /* percentage, always 3 chars */
+        {
+            char pct_s[8];
+            u32toa((uint32_t)pct, pct_s);
+            j = 0;
+            while (3 - (int)strlen(pct_s) > j) { line[pos++] = ' '; j++; }
+            for (j = 0; pct_s[j]; j++) line[pos++] = pct_s[j];
+        }
+        line[pos++] = '%';
+        while (pos < inner) line[pos++] = ' ';
+        line[inner] = '\0';
+    }
+    vid_fill(top + 2, left + 1, inner, ' ', A_DLG);
+    vid_puts(top + 2, left + 1, line, A_DLG);
+
+    /* ── progress bar row ── */
+    vid_fill(top + 3, left + 1, inner, ' ', A_DLG);
+    c = left + 1;
+    for (i = 0; i < (int)bar_fill; i++)
+        vid_putat(top + 3, c++, 0xDB, A_DLG_HI);  /* full block */
+    for (; i < inner; i++)
+        vid_putat(top + 3, c++, 0xB1, A_DLG);     /* light shade */
+
+    /* ── name row (middle-truncated) ── */
+    fmt_ellipsis_mid(nbuf, name, (uint16_t)inner);
+    vid_fill(top + 4, left + 1, inner, ' ', A_DLG);
+    vid_puts(top + 4, left + 1, nbuf, A_DLG);
+
+    vid_flush();
 }
 
 /* ─── High-level dialogs ─── */

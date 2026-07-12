@@ -81,4 +81,13 @@ int dlg_msgbox(const char *text, int buttons);
  * Returns HDK_OK or HDK_CANCEL. On HDK_OK, buf is NUL-terminated. */
 int dlg_input(const char *title, char *buf, int max);
 
+/* Display a non-blocking progress box.  Call before each item to copy/move.
+ *   title  — box header (e.g. "Copying")
+ *   cur    — current item number, 1-based
+ *   total  — total item count
+ *   name   — current item path/name (middle-truncated to fit)
+ * Draws and flushes the shadow buffer; reads no keys. */
+void dlg_progress(const char *title, uint16_t cur, uint16_t total,
+                  const char *name);
+
 #endif /* HDK_DIALOG_H */

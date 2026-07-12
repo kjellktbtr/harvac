@@ -9,6 +9,9 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
+#include "fcntl.h"
+#include "unistd.h"
+#include "fileops.h"
 #include "fs.h"
 #include "panel.h"
 #include "viewer.h"
@@ -52,7 +55,7 @@ void __far _main(void)
         /* F10: Quit */
         if (k == K_F10) {
             vid_done();
-            ncd_exit();
+            _exit(0);
         }
 
         /* F3: View, F4: Edit (Shift-F4: new file), F5-F8: File ops */
@@ -75,10 +78,11 @@ void __far _main(void)
             continue;
         }
 
-        /* Insert: toggle selection */
+        /* Insert: toggle selection and advance cursor (Norton style) */
         if (k == K_INS) {
             panel_t *p = active_panel == PANEL_LEFT ? &panel_left : &panel_right;
             panel_toggle_select(p);
+            panel_down(p);
             continue;
         }
 
@@ -185,7 +189,7 @@ static void launch_child(const char *cmd, const char *args, int pause)
     static const char pak_msg[] = "\r\n[Press any key]";
 
     syscall_int40(SYSCALL_CLEAR_SCREEN, 0, 0, 0, 0, 0, 0);
-    ncd_exec(cmd, args);
+    spawn(cmd, args);
     if (pause) {
         /* Write directly to VGA: the child owned the screen */
         syscall_int40(SYSCALL_WRITE_VGA, 0, 0, 0, 0, (u16)pak_msg, 0);
@@ -193,6 +197,9 @@ static void launch_child(const char *cmd, const char *args, int pause)
     }
     panel_refresh(&panel_left);
     panel_refresh(&panel_right);
+    /* The child wrote directly to VGA, staling the shadow buffer.
+     * Force a full repaint so no leftover output survives. */
+    vid_dirty_all();
     full_render();
 }
 
@@ -207,7 +214,7 @@ static void shell_prompt(const char *prefill)
 
     /* Commands run in the active panel's directory */
     panel_sync_cwd(active_panel == PANEL_LEFT ? &panel_left : &panel_right);
-    ncd_getcwd(cwd, sizeof(cwd));
+    getcwd(cwd, sizeof(cwd));
 
     /* Pre-fill from prefill if provided */
     cmd[0] = '\0';
@@ -318,7 +325,7 @@ static void handle_shift_f4(void)
 {
     panel_t *p = active_panel == PANEL_LEFT ? &panel_left : &panel_right;
     char name[NAME_MAX];
-    u16 h;
+    int h;
 
     name[0] = '\0';
     if (dlg_input("New file:", name, NAME_MAX - 1) != DR_OK
@@ -330,9 +337,9 @@ static void handle_shift_f4(void)
     panel_sync_cwd(p);
 
     /* Create the file if it doesn't exist yet */
-    h = ncd_create(name);
-    if (h < 16)
-        ncd_close(h);
+    h = open(name, O_WRONLY | O_CREAT);
+    if (h >= 0)
+        close(h);
 
     launch_child("EDIT.COM", name, 0);
 }
@@ -382,26 +389,33 @@ static void handle_f5(void)
     /* Change to source directory */
     panel_sync_cwd(src_p);
 
-    /* Copy selected files, or the current file if none selected */
-    if (sel_count > 0) {
-        for (i = 0; i < src_p->count; i++) {
+    /* Total for progress: how many top-level items will be copied */
+    {
+        u16 total = (sel_count > 0) ? sel_count : 1;
+
+        /* Copy selected files, or the current file if none selected */
+        if (sel_count > 0) {
+            for (i = 0; i < src_p->count; i++) {
+                panel_entry_t e_tmp;
+                panel_entry_get(src_p, i, &e_tmp);
+                if (!e_tmp.selected) continue;
+                dlg_progress("Copying", copied + 1, total, e_tmp.name);
+                strcpy(dst_path, dst_p->cwd);
+                strcat(dst_path, "/");
+                strcat(dst_path, e_tmp.name);
+                copy_tree(e_tmp.name, dst_path);
+                copied++;
+            }
+        } else {
             panel_entry_t e_tmp;
-            panel_entry_get(src_p, i, &e_tmp);
-            if (!e_tmp.selected) continue;
+            panel_entry_get(src_p, src_p->sel, &e_tmp);
+            dlg_progress("Copying", 1, 1, e_tmp.name);
             strcpy(dst_path, dst_p->cwd);
             strcat(dst_path, "/");
             strcat(dst_path, e_tmp.name);
-            ncd_copy_recursive(e_tmp.name, dst_path);
-            copied++;
+            copy_tree(e_tmp.name, dst_path);
+            copied = 1;
         }
-    } else {
-        panel_entry_t e_tmp;
-        panel_entry_get(src_p, src_p->sel, &e_tmp);
-        strcpy(dst_path, dst_p->cwd);
-        strcat(dst_path, "/");
-        strcat(dst_path, e_tmp.name);
-        ncd_copy_recursive(e_tmp.name, dst_path);
-        copied = 1;
     }
 
     /* Refresh both panels (each re-syncs its own CWD) */
@@ -431,18 +445,18 @@ static void handle_f6(void)
     strcpy(new_name, e.name);
 
     /* Save CWD and change to panel's directory */
-    ncd_getcwd(old_cwd, sizeof(old_cwd));
-    ncd_chdir(p->cwd);
+    getcwd(old_cwd, sizeof(old_cwd));
+    chdir(p->cwd);
 
     /* Show rename dialog */
     if (dlg_input("Rename/Move:", new_name, NAME_MAX - 1) == DR_OK) {
         if (strcmp(new_name, e.name) != 0) {
-            ncd_rename(e.name, new_name);
+            rename(e.name, new_name);
         }
     }
 
     /* Restore CWD */
-    ncd_chdir(old_cwd);
+    chdir(old_cwd);
 
     /* Refresh both panels */
     panel_refresh(&panel_left);
@@ -459,18 +473,18 @@ static void handle_f7(void)
     dir_name[0] = '\0';
 
     /* Save CWD and change to panel's directory */
-    ncd_getcwd(old_cwd, sizeof(old_cwd));
-    ncd_chdir(p->cwd);
+    getcwd(old_cwd, sizeof(old_cwd));
+    chdir(p->cwd);
 
     /* Show mkdir dialog */
     if (dlg_input("Create directory:", dir_name, NAME_MAX - 1) == DR_OK) {
         if (dir_name[0] != '\0') {
-            ncd_mkdir(dir_name);
+            mkdir(dir_name);
         }
     }
 
     /* Restore CWD */
-    ncd_chdir(old_cwd);
+    chdir(old_cwd);
 
     /* Refresh both panels */
     panel_refresh(&panel_left);
@@ -494,8 +508,8 @@ static void handle_f8(void)
         return;
 
     /* Save CWD and change to panel's directory */
-    ncd_getcwd(old_cwd, sizeof(old_cwd));
-    ncd_chdir(p->cwd);
+    getcwd(old_cwd, sizeof(old_cwd));
+    chdir(p->cwd);
 
     /* Delete selected files, or current file if none selected */
     if (panel_count_selected(p) > 0) {
@@ -503,17 +517,17 @@ static void handle_f8(void)
             panel_entry_t e_tmp;
             panel_entry_get(p, i, &e_tmp);
             if (e_tmp.selected) {
-                ncd_delete_recursive(e_tmp.name);
+                remove_tree(e_tmp.name);
             }
         }
     } else if (p->sel < p->count) {
         panel_entry_t e_tmp;
         panel_entry_get(p, p->sel, &e_tmp);
-        ncd_delete_recursive(e_tmp.name);
+        remove_tree(e_tmp.name);
     }
 
     /* Restore CWD */
-    ncd_chdir(old_cwd);
+    chdir(old_cwd);
 
     /* Refresh both panels */
     panel_refresh(&panel_left);

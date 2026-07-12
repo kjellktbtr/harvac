@@ -35,4 +35,9 @@ void vid_cursor(int row, int col);
 /* Hide the hardware cursor via CRTC. */
 void vid_cursor_hide(void);
 
+/* Mark every row dirty so the next vid_flush() does a full repaint.
+ * Call this after a child program has written directly to VGA (bypassing
+ * the shadow buffer), to ensure nothing is left on screen. */
+void vid_dirty_all(void);
+
 #endif /* HDK_VIDEO_H */

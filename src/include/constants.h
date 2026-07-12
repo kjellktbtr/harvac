@@ -19,6 +19,8 @@
 #define SYSCALL_WRITE_VGA       0x0A  /* SI = string; VGA-only (never serial) */
 #define SYSCALL_KEY_AVAILABLE   0x0B  /* nonzero if a key event is buffered
                                        * (keyboard only, never serial) */
+#define SYSCALL_SET_STDIN       0x0C  /* BX = file handle (0xFFFF to clear) */
+#define SYSCALL_ISATTY          0x0D  /* returns 1 if stdin is keyboard, 0 if piped */
 
 /* File I/O (0x10-0x1F) */
 #define SYSCALL_OPEN            0x10
@@ -31,6 +33,7 @@
 #define SYSCALL_STAT            0x17
 #define SYSCALL_RENAME          0x18  /* SI = old name offset, DI = new name offset */
 #define SYSCALL_TELL            0x19  /* BX = handle, CX = ptr to 4-byte position buf */
+#define SYSCALL_UTIME           0x1A  /* SI = path, CX = FAT16 date, DX = FAT16 time */
 
 /* Directory (0x20-0x2F) */
 #define SYSCALL_OPENDIR         0x20
@@ -45,6 +48,7 @@
 #define SYSCALL_MOUNT           0x30
 #define SYSCALL_UNMOUNT         0x31
 #define SYSCALL_LIST_MOUNTS     0x32
+#define SYSCALL_STATFS          0x33  /* CX = ptr to statfs_t in caller DS */
 
 /* Process (0x40-0x4F) */
 #define SYSCALL_EXEC            0x40
