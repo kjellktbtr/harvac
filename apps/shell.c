@@ -1,10 +1,10 @@
 /* shell.c -- User-space REPL shell for HarvaOS
- * .COM entry point, uses INT 0x40 syscalls for all I/O.
+ * .COM entry point, uses libc stdio/string/unistd for I/O and string ops.
  * Built-in commands loop within one SHELL.COM invocation.
  * External commands use SYSCALL_EXEC; since EXEC now returns (DOS model),
  * the shell is fully resident: it stays in memory while children run at
  * CHILD_SEGMENT (0x6000).
- * "exit" calls SYSCALL_EXIT; root-level exit restarts boot_shell.
+ * "exit" calls _exit(); root-level exit restarts boot_shell.
  *
  * Batch scripts (.BAT): typing NAME.BAT or NAME (falling back to NAME.BAT)
  * opens the file and runs lines in order; echo on/off and @ suppression work.
@@ -17,23 +17,19 @@
 #include "types.h"
 #include "constants.h"
 #include "port_io.h"
+#include "stdio.h"
+#include "string.h"
+#include "fcntl.h"
+#include "unistd.h"
 
 /* Line buffer size */
 #define LINE_MAX    128
 
-/* Sentinel: no active redirect or batch file */
+/* Sentinel for raw kernel redirect handle (NO_HANDLE = none active) */
 #define NO_HANDLE  0xFFFFu
 
 /* Forward declarations */
-static void putstr(const char *s);
-static void putch(char c);
-static void read_line(char *buf, uint16_t maxlen);
-static int str_eq(const char *a, const char *b);
-static int str_eqi(const char *a, const char *b);
-static uint16_t str_len(const char *s);
-static int has_ext(const char *s);
-static int is_bat_ext(const char *s);
-static uint16_t read_bat_line(uint16_t fh, char *buf, uint16_t maxlen);
+static int  read_bat_line(int fd, char *buf, uint16_t maxlen);
 static void cmd_help(void);
 static void cmd_cd(const char *arg);
 static void cmd_pwd(void);
@@ -46,13 +42,13 @@ void __far _main(void)
     char bat_name[16];   /* scratch for "CMD.BAT" fallback */
     uint16_t i, j, k;
     uint16_t ret;
-    uint16_t rh;         /* stdout redirect handle; NO_HANDLE = none */
-    uint16_t bat_h;      /* batch file handle; NO_HANDLE = not running */
+    uint16_t rh;         /* stdout redirect handle (raw kernel); NO_HANDLE = none */
+    int      bat_fd;     /* batch file fd; -1 = not running */
     uint16_t bat_echo;   /* 1 = echo batch lines, 0 = silent */
     uint16_t oneshot;    /* 1 = running the PSP command tail; exit after */
     uint16_t have_line;  /* 1 = line[] already holds the next command */
 
-    bat_h    = NO_HANDLE;
+    bat_fd   = -1;
     bat_echo = 1;
 
     /* Command tail from PSP 0x0082 (written by SYSCALL_EXEC):
@@ -73,7 +69,7 @@ void __far _main(void)
     have_line = oneshot;
 
     if (!oneshot)
-        putstr("Harvac Shell v0.4\r\n");
+        fputs("Harvac Shell v0.4\r\n");
 
     for (;;) {
         rh = NO_HANDLE;
@@ -82,23 +78,23 @@ void __far _main(void)
         if (have_line) {
             have_line = 0;   /* line[] holds the PSP command tail */
         } else {
-        if (bat_h != NO_HANDLE) {
-            if (read_bat_line(bat_h, line, LINE_MAX) == 0) {
+        if (bat_fd >= 0) {
+            if (read_bat_line(bat_fd, line, LINE_MAX) == 0) {
                 /* EOF: close batch, fall through to interactive */
-                syscall_int40(SYSCALL_CLOSE, 0, bat_h, 0, 0, 0, 0);
-                bat_h = NO_HANDLE;
+                close(bat_fd);
+                bat_fd = -1;
             }
         }
-        if (bat_h == NO_HANDLE) {
+        if (bat_fd < 0) {
             /* One-shot command (and any batch it started) finished */
             if (oneshot)
                 break;
             /* Interactive mode: print prompt, read line */
-            syscall_int40(SYSCALL_GETCWD, 0, 0, (uint16_t)cwd, 64, 0, 0);
-            putstr("\r\n");
-            putstr(cwd);
-            putstr("> ");
-            read_line(line, LINE_MAX);
+            getcwd(cwd, sizeof(cwd));
+            fputs("\r\n");
+            fputs(cwd);
+            fputs("> ");
+            gets(line, LINE_MAX);
         } else {
             /* Batch mode: handle '@' per-line suppress and echo */
             uint16_t li = 0;
@@ -109,11 +105,11 @@ void __far _main(void)
                 while (line[li]) { line[li] = line[li + 1]; li++; }
             }
             if (echo_this) {
-                syscall_int40(SYSCALL_GETCWD, 0, 0, (uint16_t)cwd, 64, 0, 0);
-                putstr(cwd);
-                putstr("> ");
-                putstr(line);
-                putstr("\r\n");
+                getcwd(cwd, sizeof(cwd));
+                fputs(cwd);
+                fputs("> ");
+                fputs(line);
+                fputs("\r\n");
             }
         }
         }   /* end line-source selection (have_line) */
@@ -149,12 +145,13 @@ void __far _main(void)
                 line[k] = '\0';
             }
 
-            /* Delete any existing file (ignore result), then create */
+            /* Delete any existing file (ignore result), then create via raw
+             * kernel handle so we can pass it to SYSCALL_SET_STDOUT. */
             if (redir && *redir != '\0') {
                 syscall_int40(SYSCALL_DELETE, 0, (uint16_t)redir, 0, 0, 0, 0);
                 rh = syscall_int40(SYSCALL_CREATE, 0, (uint16_t)redir, 0, 0, 0, 0);
                 if (rh >= 16) {
-                    putstr("Cannot create redirect file\r\n");
+                    fputs("Cannot create redirect file\r\n");
                     continue;
                 }
                 syscall_int40(SYSCALL_SET_STDOUT, 0, rh, 0, 0, 0, 0);
@@ -172,30 +169,29 @@ void __far _main(void)
         }
 
         /* Dispatch built-in commands */
-        if (str_eq(line + i, "help")) {
+        if (strcmp(line + i, "help") == 0) {
             cmd_help();
-        } else if (str_eq(line + i, "echo")) {
-            /* echo on/off controls batch line echoing */
-            if (str_eqi(line + j, "on")) {
+        } else if (strcmp(line + i, "echo") == 0) {
+            if (strcasecmp(line + j, "on") == 0) {
                 bat_echo = 1;
-            } else if (str_eqi(line + j, "off")) {
+            } else if (strcasecmp(line + j, "off") == 0) {
                 bat_echo = 0;
             } else {
                 if (line[j] != '\0')
-                    putstr(line + j);
-                putstr("\r\n");
+                    fputs(line + j);
+                fputs("\r\n");
             }
-        } else if (str_eq(line + i, "clear")) {
+        } else if (strcmp(line + i, "clear") == 0) {
             syscall_int40(SYSCALL_CLEAR_SCREEN, 0, 0, 0, 0, 0, 0);
-        } else if (str_eq(line + i, "cd")) {
+        } else if (strcmp(line + i, "cd") == 0) {
             cmd_cd(line + j);
-        } else if (str_eq(line + i, "pwd")) {
+        } else if (strcmp(line + i, "pwd") == 0) {
             cmd_pwd();
-        } else if (str_eq(line + i, "exit")) {
-            putstr("Bye!\r\n");
-            if (bat_h != NO_HANDLE) {
-                syscall_int40(SYSCALL_CLOSE, 0, bat_h, 0, 0, 0, 0);
-                bat_h = NO_HANDLE;
+        } else if (strcmp(line + i, "exit") == 0) {
+            fputs("Bye!\r\n");
+            if (bat_fd >= 0) {
+                close(bat_fd);
+                bat_fd = -1;
             }
             break;
         } else {
@@ -204,19 +200,18 @@ void __far _main(void)
              * If name ends in .bat: open as batch (do not exec).
              * Otherwise: try SYSCALL_EXEC; if not found and name has no
              * extension, try appending .bat before giving up. */
-            if (is_bat_ext(line + i)) {
+            if (ends_with(line + i, ".bat")) {
                 /* Explicit .bat extension */
-                uint16_t h = syscall_int40(SYSCALL_OPEN, 0,
-                                           (uint16_t)(line + i), 0, 0, 0, 0);
-                if (h < 16) {
-                    if (bat_h != NO_HANDLE)
-                        syscall_int40(SYSCALL_CLOSE, 0, bat_h, 0, 0, 0, 0);
-                    bat_h = h;
+                int h = open(line + i, O_RDONLY);
+                if (h >= 0) {
+                    if (bat_fd >= 0)
+                        close(bat_fd);
+                    bat_fd = h;
                     bat_echo = 1;
                 } else {
-                    putstr("Not found: ");
-                    putstr(line + i);
-                    putstr("\r\n");
+                    fputs("Not found: ");
+                    fputs(line + i);
+                    fputs("\r\n");
                 }
             } else {
                 /* Try exec as .COM */
@@ -225,8 +220,8 @@ void __far _main(void)
                                     (uint16_t)(line + j), 0, 0, 0);
                 if (ret != 0) {
                     /* EXEC failed: if no extension in command, try .BAT */
-                    if (!has_ext(line + i)) {
-                        uint16_t h;
+                    if (strchr(line + i, '.') == (char *)0) {
+                        int h;
                         uint16_t blen = 0;
                         const char *cmd = line + i;
                         while (cmd[blen] && blen < 11) {
@@ -238,14 +233,12 @@ void __far _main(void)
                         bat_name[blen++] = 'a';
                         bat_name[blen++] = 't';
                         bat_name[blen] = '\0';
-                        h = syscall_int40(SYSCALL_OPEN, 0,
-                                          (uint16_t)bat_name, 0, 0, 0, 0);
-                        if (h < 16) {
-                            if (bat_h != NO_HANDLE)
-                                syscall_int40(SYSCALL_CLOSE, 0, bat_h, 0, 0, 0, 0);
-                            bat_h = h;
+                        h = open(bat_name, O_RDONLY);
+                        if (h >= 0) {
+                            if (bat_fd >= 0)
+                                close(bat_fd);
+                            bat_fd = h;
                             bat_echo = 1;
-                            /* Redirect cleanup below; no error message */
                             goto after_exec;
                         }
                     }
@@ -256,98 +249,34 @@ void __far _main(void)
                         syscall_int40(SYSCALL_CLOSE, 0, rh, 0, 0, 0, 0);
                         rh = NO_HANDLE;
                     }
-                    putstr("Unknown command: ");
-                    putstr(line + i);
-                    putstr("\r\n");
+                    fputs("Unknown command: ");
+                    fputs(line + i);
+                    fputs("\r\n");
                 }
             }
         }
 
         after_exec:
-        /* Close redirect if still active (built-ins, successful EXEC, or batch launch) */
+        /* Close redirect if still active */
         if (rh != NO_HANDLE) {
             syscall_int40(SYSCALL_SET_STDOUT, 0, (uint16_t)NO_HANDLE, 0, 0, 0, 0);
             syscall_int40(SYSCALL_CLOSE, 0, rh, 0, 0, 0, 0);
         }
     }
 
-    syscall_int40(SYSCALL_EXIT, 0, 0, 0, 0, 0, 0);
+    _exit(0);
 }
 
-/* putstr: write NUL-terminated string via syscall */
-static void putstr(const char *s)
-{
-    syscall_int40(SYSCALL_WRITE_STDOUT, 0, 0, 0, 0, (uint16_t)s, 0);
-}
-
-/* putch: write single character via syscall */
-static void putch(char c)
-{
-    syscall_int40(SYSCALL_WRITE_CHAR, (uint8_t)c, 0, 0, 0, 0, 0);
-}
-
-/* read_line: read one line from serial/keyboard via syscall */
-static void read_line(char *buf, uint16_t maxlen)
-{
-    syscall_int40(SYSCALL_READ_STDIN, 0, 0, 0, 0, (uint16_t)buf, maxlen);
-}
-
-/* str_eq: exact string comparison (0 = no match, 1 = match) */
-static int str_eq(const char *a, const char *b)
-{
-    while (*a && *b && *a == *b) { a++; b++; }
-    return (*a == '\0' && *b == '\0');
-}
-
-/* str_eqi: case-insensitive string comparison */
-static int str_eqi(const char *a, const char *b)
-{
-    while (*a && *b) {
-        char ca = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
-        char cb = (*b >= 'A' && *b <= 'Z') ? (char)(*b + 32) : *b;
-        if (ca != cb) return 0;
-        a++; b++;
-    }
-    return (*a == '\0' && *b == '\0');
-}
-
-/* str_len: string length */
-static uint16_t str_len(const char *s)
-{
-    uint16_t n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
-/* has_ext: returns 1 if string contains a '.' */
-static int has_ext(const char *s)
-{
-    while (*s) { if (*s == '.') return 1; s++; }
-    return 0;
-}
-
-/* is_bat_ext: returns 1 if string ends in .bat or .BAT (case-insensitive) */
-static int is_bat_ext(const char *s)
-{
-    uint16_t len = str_len(s);
-    if (len < 4) return 0;
-    return (s[len - 4] == '.' &&
-            (s[len - 3] == 'b' || s[len - 3] == 'B') &&
-            (s[len - 2] == 'a' || s[len - 2] == 'A') &&
-            (s[len - 1] == 't' || s[len - 1] == 'T'));
-}
-
-/* read_bat_line: read next line from batch file into buf.
+/* read_bat_line: read next line from batch file fd into buf.
  * Skips \r, stops at \n or EOF. Returns 1 if any bytes read, 0 on EOF. */
-static uint16_t read_bat_line(uint16_t fh, char *buf, uint16_t maxlen)
+static int read_bat_line(int fd, char *buf, uint16_t maxlen)
 {
     char c;
     uint16_t n = 0;
-    uint16_t got = 0;
+    int got = 0;
     while (n < maxlen - 1) {
-        /* SYSCALL_READ: BX=handle, CX=buf_ptr, DX=count */
-        if (syscall_int40(SYSCALL_READ, 0, fh, (uint16_t)&c, 1, 0, 0) == 0)
-            break;  /* EOF */
+        if (read(fd, &c, 1) <= 0)
+            break;
         got = 1;
         if ((uint8_t)c == '\r') continue;
         if ((uint8_t)c == '\n') break;
@@ -360,32 +289,30 @@ static uint16_t read_bat_line(uint16_t fh, char *buf, uint16_t maxlen)
 /* cmd_help: list available commands */
 static void cmd_help(void)
 {
-    putstr("Built-in commands:\r\n");
-    putstr("  help          - Show this help\r\n");
-    putstr("  echo [text]   - Print text (echo on/off controls batch echo)\r\n");
-    putstr("  clear         - Clear screen\r\n");
-    putstr("  cd [path]     - Change directory\r\n");
-    putstr("  pwd           - Print working directory\r\n");
-    putstr("  exit          - Exit shell\r\n");
-    putstr("  <name>        - Execute BIN/<name>.COM or <name>.BAT\r\n");
+    fputs("Built-in commands:\r\n");
+    fputs("  help          - Show this help\r\n");
+    fputs("  echo [text]   - Print text (echo on/off controls batch echo)\r\n");
+    fputs("  clear         - Clear screen\r\n");
+    fputs("  cd [path]     - Change directory\r\n");
+    fputs("  pwd           - Print working directory\r\n");
+    fputs("  exit          - Exit shell\r\n");
+    fputs("  <name>        - Execute BIN/<name>.COM or <name>.BAT\r\n");
 }
 
-/* cmd_cd: change directory via syscall */
+/* cmd_cd: change directory */
 static void cmd_cd(const char *arg)
 {
-    uint16_t ret;
     if (!arg || *arg == '\0')
         arg = "/";
-    ret = syscall_int40(SYSCALL_CHDIR, 0, (uint16_t)arg, 0, 0, 0, 0);
-    if (ret != 0)
-        putstr("Directory not found\r\n");
+    if (chdir(arg) != 0)
+        fputs("Directory not found\r\n");
 }
 
-/* cmd_pwd: print working directory via syscall */
+/* cmd_pwd: print working directory */
 static void cmd_pwd(void)
 {
     char buf[64];
-    syscall_int40(SYSCALL_GETCWD, 0, 0, (uint16_t)buf, 64, 0, 0);
-    putstr(buf);
-    putstr("\r\n");
+    getcwd(buf, sizeof(buf));
+    fputs(buf);
+    fputs("\r\n");
 }
