@@ -15,3 +15,12 @@ pipe.out
 # NOTE: harvac.img and build/*.COM (plus mbr.bin/vbr.bin) are kept in
 # version control on purpose, so users can run HarvaC without the toolchain.
 *.map
+
+# Intermediate OMF library from wlib experiments
+build/harvac.lib
+
+# Standalone DOS NCD port (other/dos/ncd): build artifacts and test output
+other/dos/ncd/build/
+other/dos/ncd/*.COM
+other/dos/ncd/*.TXT
+other/dos/ncd/test.img

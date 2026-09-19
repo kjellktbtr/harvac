@@ -96,7 +96,7 @@ def compile_c(src: Path, out_dir: Path) -> bool:
     obj = out_dir / (src.stem + ".obj")
     try:
         run([
-            str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx",
+            str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx", "-zm",
             "-bt=dos",
             f"-i={INCLUDE_DIR}",
             f"-i={LIB_INCLUDE_DIR}",
@@ -187,6 +187,11 @@ def link_kernel(obj_dir: Path, out_dir: Path) -> bool:
         f.write("format raw bin\n")
         f.write("option offset=0\n")
         f.write("option quiet\n")
+        # Dead code elimination: -zm compiler flag puts each function in
+        # its own segment; eliminate removes unreferenced segments.
+        # Entry point is __entry from entry.asm (first obj in link order).
+        f.write("option eliminate\n")
+        f.write("option start=__entry\n")
         f.write(f"name {kernel_out}\n")
         f.write("\n")
         for obj in obj_files:
@@ -265,6 +270,12 @@ def link_app(obj_dir: Path, out_dir: Path, app_name: str,
             f.write("option offset=0\n")
         f.write("option quiet\n")
         f.write(f"option map={map_out}\n")
+        if is_c_app:
+            # Dead code elimination: -zm compiler flag puts each function in
+            # its own segment; eliminate removes unreferenced segments.
+            # Need explicit entry point for reachability analysis.
+            f.write("option eliminate\n")
+            f.write("option start=_main_\n")
         f.write(f"name {app_out}\n")
         f.write(f"file {obj}\n")
         # lib objects AFTER app object (entry-point ordering)
@@ -326,7 +337,7 @@ def build_medit(obj_dir: Path, out_dir: Path,
         obj = obj_dir / f"medit_{name}.obj"
         try:
             run([
-                str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx",
+                str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx", "-zm",
                 "-bt=dos",
                 f"-i={INCLUDE_DIR}",
                 f"-i={LIB_INCLUDE_DIR}",
@@ -346,6 +357,9 @@ def build_medit(obj_dir: Path, out_dir: Path,
         f.write("format raw bin\n")
         f.write("option offset=0x100\n")
         f.write("option quiet\n")
+        # Dead code elimination
+        f.write("option eliminate\n")
+        f.write("option start=_main_\n")
         f.write(f"name {edit_out}\n")
         for obj in objs:
             f.write(f"file {obj}\n")
@@ -379,7 +393,7 @@ def build_ncd(obj_dir: Path, out_dir: Path,
         obj = obj_dir / f"ncd_{name}.obj"
         try:
             run([
-                str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx",
+                str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx", "-zm",
                 "-bt=dos",
                 f"-i={INCLUDE_DIR}",
                 f"-i={LIB_INCLUDE_DIR}",
@@ -399,6 +413,9 @@ def build_ncd(obj_dir: Path, out_dir: Path,
         f.write("format raw bin\n")
         f.write("option offset=0x100\n")
         f.write("option quiet\n")
+        # Dead code elimination
+        f.write("option eliminate\n")
+        f.write("option start=_main_\n")
         f.write(f"name {ncd_out}\n")
         for obj in objs:
             f.write(f"file {obj}\n")
@@ -429,7 +446,7 @@ def build_libs(obj_dir: Path) -> list:
         obj = obj_dir / f"lib_{src.stem}.obj"
         try:
             run([
-                str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx",
+                str(WCC), "-0", "-ms", "-os", "-s", "-zl", "-d0", "-wx", "-zm",
                 "-bt=dos",
                 f"-i={INCLUDE_DIR}",
                 f"-i={LIB_INCLUDE_DIR}",
